@@ -72,7 +72,19 @@ jobs:
           CLIENT_URL="http://localhost:3000"
           EOF
 
+      # The Prisma CLI has its own, independent dotenv loading — it only
+      # auto-reads a file literally named `.env`, never `.env.test`, so
+      # writing .env.test above (which the *application's* env.js loads
+      # correctly by name) doesn't help this step at all. Found by
+      # actually watching this workflow run on GitHub's infrastructure
+      # (Docker isn't available in the sandbox this project was built in,
+      # so this was the first real chance to catch it) — `migrate deploy`
+      # failed with "Environment variable not found: DATABASE_URL" despite
+      # the previous step clearly having written a file with that value in
+      # it. Passing it directly as this step's own env is the fix.
       - name: Apply migrations
+        env:
+          DATABASE_URL: postgresql://postgres:postgres@localhost:5432/ride_sharing_test?schema=public
         run: npx prisma migrate deploy
 
       - name: Run test suite
