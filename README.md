@@ -61,6 +61,8 @@ Health check: `GET /health` — verifies both Postgres and Redis are reachable, 
 
 > macOS note: port 5000 is claimed by AirPlay Receiver by default — this project defaults to **4000**.
 
+Running tests requires a separate database — see [Testing](#testing) below for one-time setup, then `npm test`.
+
 ## Authentication
 
 All routes mounted under `/api/v1/auth`:
@@ -287,6 +289,30 @@ Mounted under `/api/v1/admin`:
 | GET | `/analytics/rides` \| `/analytics/revenue` | `?from=&to=&interval=day\|week\|month`, defaults to the last 30 days |
 | GET | `/analytics/top-drivers` | `?by=earnings\|rides\|rating&limit=`; `rating` excludes drivers with zero completed rides — a driver who's never been rated defaults to `0`, which would otherwise incorrectly rank above everyone with a real 5-star average |
 
+## Testing
+
+**Real Postgres, no mocked database** — the same philosophy this project used manually (curl + a real local Postgres/Redis) for ten phases before a test suite existed at all. `ride_sharing_test` is a separate database, migrated with `prisma migrate deploy` (the non-interactive command, correct for an environment that only applies existing migrations rather than authoring new ones); Redis tests use logical DB index 1, keeping job/geo state out of whatever's in the dev Redis (index 0).
+
+**Native ESM, no Babel.** Jest runs with `NODE_OPTIONS=--experimental-vm-modules`, understanding the project's actual `"type": "module"` code directly — adding a Babel transform just to satisfy the test runner would mean tests execute through a step the real app never goes through.
+
+```bash
+createdb ride_sharing_test
+DATABASE_URL="postgresql://<user>@localhost:5432/ride_sharing_test?schema=public" npx prisma migrate deploy
+npm test
+```
+
+Three layers, each earning its place rather than duplicating the others:
+
+- **`tests/unit/`** — pure functions and two regression tests for real bugs found earlier in this project (the Express 5 `req.query` getter, and `z.coerce.boolean()` treating `"false"` as truthy). No I/O, no setup.
+- **`tests/integration/`** — repository functions against the real test database. This is where the two most important correctness guarantees in the codebase get proven under **genuine concurrent access**, not sequential calls: `wallet.repository.test.js` fires two real simultaneous debits at a wallet that can only cover one, and `ride.repository.test.js` fires two real simultaneous `accept` attempts at the same ride — the same scenario verified manually with curl back in Phase 5, now automated.
+- **`tests/api/`** — full HTTP round trips via Supertest against `app.js` directly, **not** `server.js` — the Phase 1 decision to keep `app.js` free of side effects (no listening socket, no job workers, no Socket.IO) is what makes this simple at all.
+
+**Two more real bugs, found while wiring the test suite itself up** (not app bugs — testing-infrastructure bugs, still worth being honest about):
+- `npm test` hung indefinitely instead of exiting. Cause: importing `app.js` transitively imports `jobs/queues.js` (auth → email → notifications), and each BullMQ `Queue` duplicates its own Redis connection internally rather than sharing one — closing only the original connection left those duplicates open. Fixed in `tests/helpers/teardown.js`, which closes the actual `Queue` instances.
+- Every test ran with `LOG_LEVEL=debug` (dev's value) instead of `.env.test`'s `error`, flooding output with SQL query logs. Cause: dotenv's default is to never override a `process.env` value that's already set, and something in Jest's own startup left stray values in place before `env.js`'s `dotenv.config()` call ran. Fixed with `override: true`, scoped to test mode only — dev intentionally keeps the opposite default, since a developer temporarily exporting a var to override `.env` without editing it is a normal workflow worth preserving.
+
+This suite is a foundation and a demonstrated pattern — proof the highest-risk logic (money, matching) is actually correct, and a template for the next contributor to extend — not a claim of exhaustive endpoint coverage. Most of the ~15 domains built across this project don't have API-layer tests yet.
+
 ## Known Limitations
 
 Deliberate, stated simplifications accumulated across phases — not gaps found by accident:
@@ -311,6 +337,6 @@ This backend is being built incrementally. Each phase is scoped, explained, and 
 - [x] **Phase 8** — Ratings
 - [x] **Phase 9** — Notifications & background jobs
 - [x] **Phase 10** — Admin dashboard & analytics
-- [ ] Testing
+- [x] **Phase 11** — Testing
 - [ ] API documentation (Swagger)
 - [ ] Docker & CI/CD

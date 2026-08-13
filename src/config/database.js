@@ -9,6 +9,7 @@ import { logger } from "./logger.js";
  * reloads reuse the same instance.
  */
 const globalForPrisma = globalThis;
+const isNewClient = !globalForPrisma.prisma;
 
 export const prisma =
   globalForPrisma.prisma ??
@@ -22,7 +23,15 @@ export const prisma =
         ],
   });
 
-if (!isProduction) {
+// Guarded by `isNewClient`, not just `!isProduction`: this module can be
+// freshly re-evaluated (a test runner giving each file its own module
+// registry, a hot reload) while `globalForPrisma.prisma` — and therefore
+// the underlying client's event emitter — persists across that. Without
+// the guard, every re-evaluation attaches another "query" listener to the
+// same long-lived client, so by the Nth file every query gets logged N
+// times. Subscribing only once, at actual creation, is what "reuse across
+// reloads" was supposed to mean in the first place.
+if (!isProduction && isNewClient) {
   globalForPrisma.prisma = prisma;
   prisma.$on("query", (e) => {
     logger.debug(`${e.query} [${e.params}] (${e.duration}ms)`);

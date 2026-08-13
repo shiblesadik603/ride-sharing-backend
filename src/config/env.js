@@ -1,5 +1,22 @@
-import "dotenv/config";
+import dotenv from "dotenv";
 import { z } from "zod";
+
+// `NODE_ENV=test` (set by `npm test`) loads `.env.test` instead of `.env`,
+// so the test suite always runs against the isolated test database and
+// Redis logical DB configured there — never against whatever's sitting in
+// a developer's local `.env` at the time.
+//
+// `override: true` in test mode only: found live while testing this phase
+// — Jest's startup leaves stray values in `process.env` (e.g. LOG_LEVEL)
+// ahead of this call running, and dotenv's default (don't clobber
+// already-set vars) silently kept those instead of applying .env.test,
+// making every test run depend on whatever pre-existing process state
+// happened to be lying around. Tests must be hermetic, so .env.test always
+// wins here. Dev intentionally keeps the opposite default — a developer
+// temporarily exporting a var to override `.env` without editing it is a
+// normal workflow worth preserving.
+const isTestEnv = process.env.NODE_ENV === "test";
+dotenv.config({ path: isTestEnv ? ".env.test" : ".env", override: isTestEnv, quiet: true });
 
 /**
  * Fail fast: validate all required environment variables at process start

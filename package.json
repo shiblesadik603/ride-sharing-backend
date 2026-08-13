@@ -14,7 +14,8 @@
     "prisma:migrate": "prisma migrate dev",
     "prisma:studio": "prisma studio",
     "seed:admin": "node scripts/createAdmin.js",
-    "test": "echo \"Error: no test specified\" && exit 1"
+    "test": "NODE_ENV=test NODE_OPTIONS=--experimental-vm-modules jest",
+    "test:watch": "NODE_ENV=test NODE_OPTIONS=--experimental-vm-modules jest --watch"
   },
   "keywords": [
     "ride-sharing",
@@ -50,8 +51,10 @@
     "zod": "^4.4.3"
   },
   "devDependencies": {
+    "jest": "^30.4.2",
     "nodemon": "^3.1.14",
     "prisma": "^6.19.3",
-    "socket.io-client": "^4.8.3"
+    "socket.io-client": "^4.8.3",
+    "supertest": "^7.2.2"
   }
 }
