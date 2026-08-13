@@ -1,0 +1,580 @@
+// ==========================================================================
+// Ride Sharing Backend — Database Schema
+// PostgreSQL + Prisma ORM
+// ==========================================================================
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// ==========================================================================
+// ENUMS
+// ==========================================================================
+
+enum Role {
+  PASSENGER
+  DRIVER
+  ADMIN
+}
+
+enum DriverVerificationStatus {
+  PENDING
+  APPROVED
+  REJECTED
+  SUSPENDED
+}
+
+enum VehicleType {
+  BIKE
+  AUTO
+  SEDAN
+  SUV
+  HATCHBACK
+}
+
+enum VehicleDocumentType {
+  REGISTRATION
+  INSURANCE
+  PERMIT
+  POLLUTION_CERTIFICATE
+}
+
+enum VerificationStatus {
+  PENDING
+  APPROVED
+  REJECTED
+}
+
+enum RideStatus {
+  REQUESTED // passenger submitted request, searching for a driver
+  ACCEPTED // a driver accepted, en route to pickup
+  ARRIVED // driver has arrived at pickup location
+  IN_PROGRESS // ride started (post OTP verification)
+  COMPLETED
+  CANCELLED
+}
+
+enum CancelledBy {
+  PASSENGER
+  DRIVER
+  SYSTEM
+}
+
+enum PaymentMethod {
+  CARD
+  WALLET
+  CASH
+}
+
+enum PaymentProvider {
+  STRIPE
+  WALLET
+  CASH
+}
+
+enum PaymentStatus {
+  PENDING
+  COMPLETED
+  FAILED
+  REFUNDED
+  PARTIALLY_REFUNDED
+}
+
+enum RefundStatus {
+  PENDING
+  COMPLETED
+  FAILED
+}
+
+enum DiscountType {
+  PERCENTAGE
+  FIXED
+}
+
+enum WalletTransactionType {
+  CREDIT
+  DEBIT
+}
+
+enum WalletTransactionReason {
+  TOPUP
+  RIDE_PAYMENT
+  RIDE_EARNING
+  REFUND
+  PROMO
+  WITHDRAWAL
+  ADJUSTMENT
+}
+
+enum RatingDirection {
+  PASSENGER_TO_DRIVER
+  DRIVER_TO_PASSENGER
+}
+
+enum NotificationChannel {
+  EMAIL
+  PUSH
+  SOCKET
+  SMS
+}
+
+enum NotificationStatus {
+  PENDING
+  SENT
+  FAILED
+}
+
+enum VerificationTokenType {
+  EMAIL_VERIFICATION
+  PASSWORD_RESET
+}
+
+// ==========================================================================
+// IDENTITY
+// ==========================================================================
+
+/// Base identity + auth record for every account, regardless of role.
+/// Role-specific data lives in Driver / Passenger extension tables so this
+/// table stays small and hot (it's read on every authenticated request).
+model User {
+  id              String    @id @default(cuid())
+  email           String    @unique
+  phone           String?   @unique
+  passwordHash    String? // nullable: OAuth-only accounts have no password
+  firstName       String
+  lastName        String
+  avatarUrl       String?
+  role            Role      @default(PASSENGER)
+  googleId        String?   @unique
+  isEmailVerified Boolean   @default(false)
+  isPhoneVerified Boolean   @default(false)
+  isActive        Boolean   @default(true)
+  lastLoginAt     DateTime?
+  createdAt       DateTime  @default(now())
+  updatedAt       DateTime  @updatedAt
+
+  driver             Driver?
+  passenger          Passenger?
+  wallet             Wallet?
+  refreshTokens      RefreshToken[]
+  verificationTokens VerificationToken[]
+  notifications      Notification[]
+  auditLogs          AuditLog[]          @relation("AuditActor")
+  paymentsMade       Payment[]           @relation("Payer")
+  ratingsGiven       Rating[]            @relation("Rater")
+  ratingsReceived    Rating[]            @relation("Ratee")
+  couponRedemptions  CouponRedemption[]
+
+  @@index([role])
+  @@map("users")
+}
+
+/// Driver-specific profile + live status. 1:1 extension of User.
+/// currentLat/currentLng are a "last known" snapshot for admin/history use
+/// only — real-time matching reads from Redis Geo, not Postgres, because
+/// GPS pings arrive every few seconds and would otherwise hammer the DB.
+model Driver {
+  id                 String                   @id @default(cuid())
+  userId             String                   @unique
+  user               User                     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  licenseNumber      String                   @unique
+  licenseExpiry      DateTime
+  verificationStatus DriverVerificationStatus @default(PENDING)
+  verifiedAt         DateTime?
+  isOnline           Boolean                  @default(false)
+  isAvailable        Boolean                  @default(false) // online but not mid-ride
+  lastKnownLat       Float?
+  lastKnownLng       Float?
+  lastLocationAt     DateTime?
+  averageRating      Decimal                  @default(0) @db.Decimal(3, 2)
+  totalRides         Int                      @default(0)
+  totalEarnings      Decimal                  @default(0) @db.Decimal(12, 2)
+  createdAt          DateTime                 @default(now())
+  updatedAt          DateTime                 @updatedAt
+
+  vehicles      Vehicle[]
+  ridesAsDriver Ride[]
+  favoritedBy   FavoriteDriver[]
+
+  @@index([verificationStatus])
+  @@index([isOnline, isAvailable])
+  @@map("drivers")
+}
+
+/// Passenger-specific profile + stats. 1:1 extension of User.
+model Passenger {
+  id            String   @id @default(cuid())
+  userId        String   @unique
+  user          User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  averageRating Decimal  @default(0) @db.Decimal(3, 2)
+  totalRides    Int      @default(0)
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+
+  ridesAsPassenger Ride[]
+  savedLocations   SavedLocation[]
+  favoriteDrivers  FavoriteDriver[]
+
+  @@map("passengers")
+}
+
+/// Hashed refresh tokens, one row per issued session/device. Supports
+/// per-device revocation and rotation (never store raw tokens).
+model RefreshToken {
+  id         String    @id @default(cuid())
+  userId     String
+  user       User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  tokenHash  String    @unique
+  deviceInfo String?
+  ipAddress  String?
+  expiresAt  DateTime
+  revokedAt  DateTime?
+  createdAt  DateTime  @default(now())
+
+  @@index([userId])
+  @@map("refresh_tokens")
+}
+
+/// Single-purpose tokens for email verification and password reset.
+/// Unified table (vs. two near-identical ones) since both are
+/// "prove control of this account, once, before it expires" tokens.
+model VerificationToken {
+  id        String                @id @default(cuid())
+  userId    String
+  user      User                  @relation(fields: [userId], references: [id], onDelete: Cascade)
+  tokenHash String                @unique
+  type      VerificationTokenType
+  expiresAt DateTime
+  usedAt    DateTime?
+  createdAt DateTime              @default(now())
+
+  @@index([userId, type])
+  @@map("verification_tokens")
+}
+
+// ==========================================================================
+// VEHICLES
+// ==========================================================================
+
+model Vehicle {
+  id          String      @id @default(cuid())
+  driverId    String
+  driver      Driver      @relation(fields: [driverId], references: [id], onDelete: Cascade)
+  type        VehicleType
+  make        String
+  model       String
+  year        Int
+  color       String
+  plateNumber String      @unique
+  capacity    Int
+  isVerified  Boolean     @default(false)
+  isActive    Boolean     @default(true)
+  createdAt   DateTime    @default(now())
+  updatedAt   DateTime    @updatedAt
+
+  documents VehicleDocument[]
+  rides     Ride[]
+
+  @@index([driverId])
+  @@map("vehicles")
+}
+
+model VehicleDocument {
+  id         String              @id @default(cuid())
+  vehicleId  String
+  vehicle    Vehicle             @relation(fields: [vehicleId], references: [id], onDelete: Cascade)
+  type       VehicleDocumentType
+  fileUrl    String
+  status     VerificationStatus  @default(PENDING)
+  expiryDate DateTime?
+  reviewedAt DateTime?
+  createdAt  DateTime            @default(now())
+
+  @@index([vehicleId])
+  @@map("vehicle_documents")
+}
+
+// ==========================================================================
+// PASSENGER PREFERENCES
+// ==========================================================================
+
+model SavedLocation {
+  id          String    @id @default(cuid())
+  passengerId String
+  passenger   Passenger @relation(fields: [passengerId], references: [id], onDelete: Cascade)
+  label       String // "Home", "Work", etc.
+  address     String
+  lat         Float
+  lng         Float
+  isFavorite  Boolean   @default(false)
+  createdAt   DateTime  @default(now())
+
+  @@index([passengerId])
+  @@map("saved_locations")
+}
+
+model FavoriteDriver {
+  id          String    @id @default(cuid())
+  passengerId String
+  passenger   Passenger @relation(fields: [passengerId], references: [id], onDelete: Cascade)
+  driverId    String
+  driver      Driver    @relation(fields: [driverId], references: [id], onDelete: Cascade)
+  createdAt   DateTime  @default(now())
+
+  @@unique([passengerId, driverId])
+  @@map("favorite_drivers")
+}
+
+// ==========================================================================
+// RIDES
+// ==========================================================================
+
+model Ride {
+  id          String    @id @default(cuid())
+  passengerId String
+  passenger   Passenger @relation(fields: [passengerId], references: [id])
+  driverId    String?
+  driver      Driver?   @relation(fields: [driverId], references: [id])
+  vehicleId   String?
+  vehicle     Vehicle?  @relation(fields: [vehicleId], references: [id])
+
+  status               RideStatus  @default(REQUESTED)
+  requestedVehicleType VehicleType
+
+  pickupAddress   String
+  pickupLat       Float
+  pickupLng       Float
+  dropoffAddress  String
+  dropoffLat      Float
+  dropoffLng      Float
+  routePolyline   String? // encoded polyline from Google Directions API
+  distanceMeters  Int?
+  durationSeconds Int?
+
+  otpCode       String? // shown to passenger, entered by driver to start ride
+  otpVerifiedAt DateTime?
+
+  estimatedFare Decimal  @db.Decimal(10, 2)
+  actualFare    Decimal? @db.Decimal(10, 2)
+  currency      String   @default("USD")
+
+  cancelledBy        CancelledBy?
+  cancellationReason String?
+
+  requestedAt DateTime  @default(now())
+  acceptedAt  DateTime?
+  arrivedAt   DateTime?
+  startedAt   DateTime?
+  completedAt DateTime?
+  cancelledAt DateTime?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  statusHistory    RideStatusLog[]
+  payment          Payment?
+  ratings          Rating[]
+  couponRedemption CouponRedemption?
+
+  @@index([passengerId])
+  @@index([driverId])
+  @@index([status])
+  @@index([requestedAt])
+  @@map("rides")
+}
+
+/// Append-only audit trail of every status transition a ride goes through.
+/// Cheap insurance for support/dispute resolution and ride analytics —
+/// the alternative is trying to reconstruct a timeline from `updatedAt`.
+model RideStatusLog {
+  id        String     @id @default(cuid())
+  rideId    String
+  ride      Ride       @relation(fields: [rideId], references: [id], onDelete: Cascade)
+  status    RideStatus
+  metadata  Json?
+  createdAt DateTime   @default(now())
+
+  @@index([rideId])
+  @@map("ride_status_logs")
+}
+
+// ==========================================================================
+// PAYMENTS & WALLET
+// ==========================================================================
+
+model Payment {
+  id                    String          @id @default(cuid())
+  rideId                String          @unique
+  ride                  Ride            @relation(fields: [rideId], references: [id])
+  payerId               String
+  payer                 User            @relation("Payer", fields: [payerId], references: [id])
+  amount                Decimal         @db.Decimal(10, 2)
+  currency              String          @default("USD")
+  method                PaymentMethod
+  provider              PaymentProvider
+  status                PaymentStatus   @default(PENDING)
+  stripePaymentIntentId String?         @unique
+  failureReason         String?
+  paidAt                DateTime?
+  createdAt             DateTime        @default(now())
+  updatedAt             DateTime        @updatedAt
+
+  refunds Refund[]
+
+  @@index([payerId])
+  @@index([status])
+  @@map("payments")
+}
+
+model Refund {
+  id             String       @id @default(cuid())
+  paymentId      String
+  payment        Payment      @relation(fields: [paymentId], references: [id])
+  amount         Decimal      @db.Decimal(10, 2)
+  reason         String
+  status         RefundStatus @default(PENDING)
+  stripeRefundId String?      @unique
+  processedAt    DateTime?
+  createdAt      DateTime     @default(now())
+
+  @@index([paymentId])
+  @@map("refunds")
+}
+
+model Coupon {
+  id            String       @id @default(cuid())
+  code          String       @unique
+  description   String?
+  discountType  DiscountType
+  discountValue Decimal      @db.Decimal(10, 2)
+  maxDiscount   Decimal?     @db.Decimal(10, 2)
+  minRideFare   Decimal?     @db.Decimal(10, 2)
+  usageLimit    Int? // total redemptions allowed, null = unlimited
+  usagePerUser  Int          @default(1)
+  validFrom     DateTime
+  validTo       DateTime
+  isActive      Boolean      @default(true)
+  createdAt     DateTime     @default(now())
+
+  redemptions CouponRedemption[]
+
+  @@map("coupons")
+}
+
+model CouponRedemption {
+  id              String   @id @default(cuid())
+  couponId        String
+  coupon          Coupon   @relation(fields: [couponId], references: [id])
+  userId          String
+  user            User     @relation(fields: [userId], references: [id])
+  rideId          String?  @unique
+  ride            Ride?    @relation(fields: [rideId], references: [id])
+  discountApplied Decimal  @db.Decimal(10, 2)
+  redeemedAt      DateTime @default(now())
+
+  @@index([couponId, userId])
+  @@map("coupon_redemptions")
+}
+
+model Wallet {
+  id        String   @id @default(cuid())
+  userId    String   @unique
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  balance   Decimal  @default(0) @db.Decimal(12, 2)
+  currency  String   @default("USD")
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  transactions WalletTransaction[]
+
+  @@map("wallets")
+}
+
+/// Append-only ledger. Wallet.balance is a denormalized cache maintained
+/// transactionally alongside each insert here — never mutate balance
+/// without a corresponding ledger row, or reconciliation becomes guesswork.
+model WalletTransaction {
+  id           String                  @id @default(cuid())
+  walletId     String
+  wallet       Wallet                  @relation(fields: [walletId], references: [id], onDelete: Cascade)
+  type         WalletTransactionType
+  reason       WalletTransactionReason
+  amount       Decimal                 @db.Decimal(12, 2)
+  balanceAfter Decimal                 @db.Decimal(12, 2)
+  referenceId  String? // e.g. rideId or paymentId this transaction relates to
+  createdAt    DateTime                @default(now())
+
+  @@index([walletId])
+  @@map("wallet_transactions")
+}
+
+// ==========================================================================
+// RATINGS
+// ==========================================================================
+
+model Rating {
+  id        String          @id @default(cuid())
+  rideId    String
+  ride      Ride            @relation(fields: [rideId], references: [id])
+  raterId   String
+  rater     User            @relation("Rater", fields: [raterId], references: [id])
+  rateeId   String
+  ratee     User            @relation("Ratee", fields: [rateeId], references: [id])
+  direction RatingDirection
+  value     Int // 1-5, enforced at the application layer via Zod
+  comment   String?
+  createdAt DateTime        @default(now())
+
+  @@unique([rideId, direction])
+  @@index([rateeId])
+  @@map("ratings")
+}
+
+// ==========================================================================
+// NOTIFICATIONS
+// ==========================================================================
+
+model Notification {
+  id        String              @id @default(cuid())
+  userId    String
+  user      User                @relation(fields: [userId], references: [id], onDelete: Cascade)
+  channel   NotificationChannel
+  title     String
+  body      String
+  data      Json?
+  isRead    Boolean             @default(false)
+  status    NotificationStatus  @default(PENDING)
+  sentAt    DateTime?
+  createdAt DateTime            @default(now())
+
+  @@index([userId, isRead])
+  @@map("notifications")
+}
+
+// ==========================================================================
+// AUDIT
+// ==========================================================================
+
+/// System-wide audit trail for security-sensitive and admin actions
+/// (verification approvals, refunds, role changes, etc). actorId is
+/// nullable for actions taken by background jobs rather than a human.
+model AuditLog {
+  id         String   @id @default(cuid())
+  actorId    String?
+  actor      User?    @relation("AuditActor", fields: [actorId], references: [id])
+  action     String
+  entityType String
+  entityId   String?
+  metadata   Json?
+  ipAddress  String?
+  createdAt  DateTime @default(now())
+
+  @@index([actorId])
+  @@index([entityType, entityId])
+  @@map("audit_logs")
+}

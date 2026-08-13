@@ -1,0 +1,30 @@
+node_modules/
+dist/
+build/
+
+# env
+.env
+.env.local
+.env.*.local
+
+# logs
+logs/
+*.log
+npm-debug.log*
+
+# os
+.DS_Store
+Thumbs.db
+
+# editors
+.vscode/
+.idea/
+
+# testing
+coverage/
+
+# prisma
+prisma/dev.db
+
+# uploads (local dev only, S3 in prod)
+uploads/
