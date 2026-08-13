@@ -43,3 +43,25 @@ export function setVerificationStatus(id, verificationStatus) {
     },
   });
 }
+
+export function setOnlineStatus(id, { isOnline, isAvailable }) {
+  return prisma.driver.update({ where: { id }, data: { isOnline, isAvailable } });
+}
+
+export function setAvailable(id, isAvailable) {
+  return prisma.driver.update({ where: { id }, data: { isAvailable } });
+}
+
+export function updateLastKnownLocation(id, lat, lng) {
+  return prisma.driver.update({
+    where: { id },
+    data: { lastKnownLat: lat, lastKnownLng: lng, lastLocationAt: new Date() },
+  });
+}
+
+export function incrementCompletedRideStats(id, earningsAmount) {
+  return prisma.driver.update({
+    where: { id },
+    data: { totalRides: { increment: 1 }, totalEarnings: { increment: earningsAmount } },
+  });
+}

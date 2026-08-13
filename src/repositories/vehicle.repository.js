@@ -16,6 +16,18 @@ export function listByDriver(driverId) {
   });
 }
 
+/** Active + verified vehicles are the only ones eligible to go online or
+ * be assigned to a ride — an unverified vehicle shouldn't be driveable. */
+export function listActiveVerifiedByDriver(driverId) {
+  return prisma.vehicle.findMany({ where: { driverId, isActive: true, isVerified: true } });
+}
+
+export function findActiveVerifiedByDriverAndType(driverId, type) {
+  return prisma.vehicle.findFirst({
+    where: { driverId, type, isActive: true, isVerified: true },
+  });
+}
+
 export function update(id, data) {
   return prisma.vehicle.update({ where: { id }, data });
 }

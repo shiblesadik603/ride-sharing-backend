@@ -47,6 +47,10 @@ const envSchema = z.object({
   SMTP_USER: z.string().optional(),
   SMTP_PASS: z.string().optional(),
   SMTP_FROM: z.string().default("Ride Sharing <no-reply@ridesharing.local>"),
+
+  // Optional — unset means route/distance/ETA fall back to a straight-line
+  // (Haversine) estimate instead of calling the Google Directions API.
+  GOOGLE_MAPS_API_KEY: z.string().optional(),
 });
 
 const parsed = envSchema.safeParse(process.env);

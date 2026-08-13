@@ -15,6 +15,8 @@ import authRoutes from "./routes/auth.routes.js";
 import userRoutes from "./routes/user.routes.js";
 import adminRoutes from "./routes/admin.routes.js";
 import vehicleRoutes from "./routes/vehicle.routes.js";
+import driverRoutes from "./routes/driver.routes.js";
+import rideRoutes from "./routes/ride.routes.js";
 
 export const app = express();
 
@@ -59,9 +61,11 @@ app.use("/api/v1/auth", authRoutes);
 app.use("/api/v1/users", userRoutes);
 app.use("/api/v1/admin", adminRoutes);
 app.use("/api/v1/vehicles", vehicleRoutes);
+app.use("/api/v1/drivers", driverRoutes);
+app.use("/api/v1/rides", rideRoutes);
 
-// Further feature routers (rides, ...) will be mounted here, under
-// /api/v1, as each phase is built.
+// Further feature routers (payments, ratings, ...) will be mounted here,
+// under /api/v1, as each phase is built.
 
 app.use(notFoundHandler);
 app.use(errorHandler);

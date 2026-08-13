@@ -135,6 +135,34 @@ Admin review, mounted under `/api/v1/admin` (role: `ADMIN` only), each writing a
 | PATCH | `/vehicle-documents/:id/review` | `APPROVED` \| `REJECTED` |
 | GET | `/vehicle-documents/:id/file` | Download any document for review |
 
+## Ride Lifecycle
+
+**Matching is pull-based, deliberately.** Without Socket.IO (that's the next phase) there's no way to push a ride offer to a driver, so drivers poll `GET /rides/nearby` — backed by a Redis Geo set (`geo:rides:pending`), not a Postgres scan — and race to accept. The accept endpoint uses a single conditional `UPDATE ... WHERE status='REQUESTED' AND driverId IS NULL` (`ride.repository.js: tryAssignDriver`) so Postgres itself serializes concurrent accepts; exactly one caller gets the row, every other caller gets a clean 409. Verified under genuine concurrent load, not just in theory — two drivers fired `accept` on the same ride simultaneously and exactly one won.
+
+Mounted under `/api/v1/rides` (authenticated):
+
+| Method | Route | Who | Notes |
+|---|---|---|---|
+| POST | `/` | Passenger | Computes route/fare, generates OTP, indexes in `geo:rides:pending` |
+| GET | `/:id` | Participant | OTP visible only if you're the passenger |
+| GET | `/history` | Passenger | Own rides, paginated, filterable by status |
+| GET | `/driver-history` | Driver | Own rides, OTP always stripped |
+| GET | `/nearby` | Driver | Redis Geo search around the driver's own position; excludes rides they've rejected |
+| POST | `/:id/accept` | Driver | Race-safe; requires online + available + a verified matching vehicle |
+| POST | `/:id/reject` | Driver | Removes this ride from *this driver's* nearby results only |
+| POST | `/:id/arrived` \| `/:id/start` \| `/:id/complete` | Driver | `/start` requires the OTP; capped at 5 attempts / 15 min |
+| POST | `/:id/cancel` | Either | Only while `REQUESTED`/`ACCEPTED`/`ARRIVED` |
+
+Mounted under `/api/v1/drivers` (authenticated, driver-only):
+
+| Method | Route | Notes |
+|---|---|---|
+| POST | `/me/online` | Requires `verificationStatus=APPROVED` + ≥1 verified vehicle; registers position in `geo:drivers:online` (unused until the Real-Time phase adds push dispatch) |
+| POST | `/me/offline` | Removes from the online geoset |
+| POST | `/me/location` | REST-polled position ping; superseded (not replaced) by a socket stream next phase |
+
+`estimateFare`/`computeRoute` fall back to a Haversine straight-line estimate (× 1.3 road factor) whenever `GOOGLE_MAPS_API_KEY` is unset **or** the Google call fails — a third-party outage degrades fare accuracy, it doesn't break ride requests. `actualFare` is set equal to `estimatedFare` at completion; recomputing it from a real GPS trail is Payments-phase work.
+
 ## Phases
 
 This backend is being built incrementally. Each phase is scoped, explained, and approved before the next begins.
@@ -143,7 +171,7 @@ This backend is being built incrementally. Each phase is scoped, explained, and 
 - [x] **Phase 2** — Authentication
 - [x] **Phase 3** — User management (passenger/driver/admin)
 - [x] **Phase 4** — Vehicle management
-- [ ] Ride lifecycle
+- [x] **Phase 5** — Ride lifecycle
 - [ ] Real-time location & sockets
 - [ ] Payments & wallet
 - [ ] Ratings
