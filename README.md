@@ -273,6 +273,20 @@ Mounted under `/api/v1/admin`:
 
 **A second real bug, unrelated to jobs, found while testing this phase**: `?isRead=false` on the notifications endpoint was matching *read* notifications, not unread ones. `z.coerce.boolean()` on a query string runs `Boolean("false")`, and any non-empty string is truthy in JavaScript — so `"false"` coerced to `true`. This exact pattern had been sitting unnoticed in two earlier phases (`GET /admin/users?isActive=false` since Phase 3, `GET /admin/coupons?isActive=false` since Phase 7) — neither had ever been tested with the `false` case specifically. Fixed once, centrally, in `common.validator.js: booleanQueryParam`, and applied to all three call sites.
 
+## Admin Dashboard & Analytics
+
+User management (Phase 3) and driver verification (Phase 4) already covered two of this bucket's five items — this phase is the other three: a live snapshot, time-bucketed trends, and a leaderboard.
+
+**Categorical breakdowns use Prisma's `groupBy`** (users by role, drivers by verification status, payments by status) — no reason to reach for raw SQL when the query builder expresses it directly. **Time-bucketed trends use raw SQL** (`analytics.repository.js: rideTrends`/`revenueTrends`) because grouping by a truncated timestamp (day/week/month buckets) isn't something `groupBy` can express — the same "go straight to Prisma for a read-model query" precedent `report.repository.js` set in Phase 9. `interval` is restricted to a fixed enum by the validator before it's ever used, and is still passed as a bound parameter rather than string-interpolated, for defense in depth. Every `COUNT`/`SUM` in the raw queries is explicitly cast (`::int`/`::float`) — Postgres returns `COUNT` as `bigint` and `NUMERIC` sums as strings over the wire by default, neither of which survives `JSON.stringify` cleanly without the cast.
+
+Mounted under `/api/v1/admin`:
+
+| Method | Route | Notes |
+|---|---|---|
+| GET | `/dashboard` | Users/drivers/vehicles/rides/revenue/payments, all "right now" |
+| GET | `/analytics/rides` \| `/analytics/revenue` | `?from=&to=&interval=day\|week\|month`, defaults to the last 30 days |
+| GET | `/analytics/top-drivers` | `?by=earnings\|rides\|rating&limit=`; `rating` excludes drivers with zero completed rides — a driver who's never been rated defaults to `0`, which would otherwise incorrectly rank above everyone with a real 5-star average |
+
 ## Known Limitations
 
 Deliberate, stated simplifications accumulated across phases — not gaps found by accident:
@@ -296,7 +310,7 @@ This backend is being built incrementally. Each phase is scoped, explained, and 
 - [x] **Phase 7** — Payments & wallet
 - [x] **Phase 8** — Ratings
 - [x] **Phase 9** — Notifications & background jobs
-- [ ] Admin dashboard & analytics
+- [x] **Phase 10** — Admin dashboard & analytics
 - [ ] Testing
 - [ ] API documentation (Swagger)
 - [ ] Docker & CI/CD

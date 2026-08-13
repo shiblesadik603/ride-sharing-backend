@@ -5,6 +5,7 @@ import * as adminPaymentController from "../controllers/adminPayment.controller.
 import * as couponController from "../controllers/coupon.controller.js";
 import * as walletController from "../controllers/wallet.controller.js";
 import * as adminReportController from "../controllers/adminReport.controller.js";
+import * as analyticsController from "../controllers/analytics.controller.js";
 import { authenticate, authorize } from "../middlewares/auth.middleware.js";
 import { validate } from "../middlewares/validate.middleware.js";
 import { listUsersQuerySchema, updateUserStatusSchema, idParamSchema } from "../validators/user.validator.js";
@@ -22,6 +23,7 @@ import {
 } from "../validators/coupon.validator.js";
 import { adjustWalletSchema } from "../validators/wallet.validator.js";
 import { reportRangeQuerySchema } from "../validators/report.validator.js";
+import { trendsQuerySchema, topDriversQuerySchema } from "../validators/analytics.validator.js";
 
 const router = Router();
 
@@ -83,6 +85,19 @@ router.post(
   "/reports/summary/send",
   validate(reportRangeQuerySchema),
   adminReportController.sendSummary
+);
+
+router.get("/dashboard", analyticsController.getDashboard);
+router.get("/analytics/rides", validate(trendsQuerySchema), analyticsController.getRideTrends);
+router.get(
+  "/analytics/revenue",
+  validate(trendsQuerySchema),
+  analyticsController.getRevenueTrends
+);
+router.get(
+  "/analytics/top-drivers",
+  validate(topDriversQuerySchema),
+  analyticsController.getTopDrivers
 );
 
 export default router;
