@@ -5,11 +5,13 @@ import compression from "compression";
 import morgan from "morgan";
 import cookieParser from "cookie-parser";
 import rateLimit from "express-rate-limit";
+import swaggerUi from "swagger-ui-express";
 
 import { env } from "./config/env.js";
 import { logger } from "./config/logger.js";
 import { notFoundHandler } from "./middlewares/notFound.middleware.js";
 import { errorHandler } from "./middlewares/error.middleware.js";
+import { generateOpenApiDocument } from "./docs/index.js";
 import healthRoutes from "./routes/health.routes.js";
 import authRoutes from "./routes/auth.routes.js";
 import userRoutes from "./routes/user.routes.js";
@@ -74,8 +76,15 @@ app.use("/api/v1/drivers", driverRoutes);
 app.use("/api/v1/rides", rideRoutes);
 app.use("/api/v1/wallet", walletRoutes);
 
-// Further feature routers (ratings, notifications, ...) will be mounted
-// here, under /api/v1, as each phase is built.
+// Generated once at startup, not per-request — the document only changes
+// when a validator or route file changes, i.e. when the process restarts.
+const openApiDocument = generateOpenApiDocument();
+app.get("/api-docs.json", (req, res) => res.json(openApiDocument));
+app.use(
+  "/api-docs",
+  swaggerUi.serve,
+  swaggerUi.setup(openApiDocument, { customSiteTitle: "Ride Sharing Backend API" })
+);
 
 app.use(notFoundHandler);
 app.use(errorHandler);

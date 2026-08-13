@@ -59,6 +59,8 @@ npm run dev
 
 Health check: `GET /health` — verifies both Postgres and Redis are reachable, not just that the process is up.
 
+Interactive API docs: `GET /api-docs` (see [API Documentation](#api-documentation-swagger) below).
+
 > macOS note: port 5000 is claimed by AirPlay Receiver by default — this project defaults to **4000**.
 
 Running tests requires a separate database — see [Testing](#testing) below for one-time setup, then `npm test`.
@@ -313,6 +315,18 @@ Three layers, each earning its place rather than duplicating the others:
 
 This suite is a foundation and a demonstrated pattern — proof the highest-risk logic (money, matching) is actually correct, and a template for the next contributor to extend — not a claim of exhaustive endpoint coverage. Most of the ~15 domains built across this project don't have API-layer tests yet.
 
+## API Documentation (Swagger)
+
+**Zod validators are the single source of truth for request schemas — not a separately maintained copy.** `@asteasolutions/zod-to-openapi` converts the *actual* validator objects every route already runs through `validate()` into OpenAPI schemas. If a validator changes, the docs change with it on the next server start; there's no separate documentation schema that can silently drift from what the API really accepts, the way hand-written JSDoc `@swagger` comments scattered across 9 route files would have.
+
+Visit `GET /api-docs` for interactive Swagger UI (try requests directly from the browser), or `GET /api-docs.json` for the raw OpenAPI 3.0 document. 75 operations across 66 path templates, all 8 route domains, generated from `src/docs/paths/*.docs.js` — one file per domain, mirroring the route files themselves so the two stay easy to keep in sync by inspection.
+
+**Request bodies are precise; response bodies are pragmatic.** Every request schema is the real validator — exact field names, types, min/max lengths, required-vs-optional. Response schemas use the actual `ApiResponse` envelope (`{success, statusCode, message, data}`) with `data` typed against real domain schemas (`User`, `Ride`, `Payment`, `Wallet`, 14 in total) for the endpoints that return them directly, and a looser shape for aggregate/paginated endpoints where hand-authoring an exact schema would roughly double this phase's scope for comparatively little reader value over the existing prose description. This is a stated tradeoff, not an oversight.
+
+One genuine library limitation surfaced immediately: OpenAPI's `pattern` field can only express a single regex, but the password policy is four chained `.regex()` calls in the real validator — the generated schema shows only the first (letter presence), so the register/reset-password docs carry an explicit prose note spelling out the full rule, rather than letting the schema imply it's less strict than it actually is.
+
+Verified live in a real browser, not just "the JSON generates without throwing": Swagger UI renders with zero console errors and zero CSP violations against this project's `helmet()` defaults — swagger-ui-express v5 ships its initialization as an external same-origin script rather than an inline one specifically to avoid needing `unsafe-inline`, which is what makes it CSP-compatible out of the box here.
+
 ## Known Limitations
 
 Deliberate, stated simplifications accumulated across phases — not gaps found by accident:
@@ -338,5 +352,5 @@ This backend is being built incrementally. Each phase is scoped, explained, and 
 - [x] **Phase 9** — Notifications & background jobs
 - [x] **Phase 10** — Admin dashboard & analytics
 - [x] **Phase 11** — Testing
-- [ ] API documentation (Swagger)
+- [x] **Phase 12** — API documentation (Swagger)
 - [ ] Docker & CI/CD
