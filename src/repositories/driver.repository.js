@@ -82,3 +82,7 @@ export function incrementCompletedRideStats(id, earningsAmount) {
     data: { totalRides: { increment: 1 }, totalEarnings: { increment: earningsAmount } },
   });
 }
+
+export function setAverageRating(id, averageRating) {
+  return prisma.driver.update({ where: { id }, data: { averageRating } });
+}

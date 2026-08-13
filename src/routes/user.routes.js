@@ -1,5 +1,6 @@
 import { Router } from "express";
 import * as userController from "../controllers/user.controller.js";
+import * as ratingController from "../controllers/rating.controller.js";
 import { authenticate } from "../middlewares/auth.middleware.js";
 import { validate } from "../middlewares/validate.middleware.js";
 import {
@@ -12,6 +13,7 @@ import {
   addFavoriteDriverSchema,
   removeFavoriteDriverSchema,
 } from "../validators/user.validator.js";
+import { myRatingsQuerySchema } from "../validators/rating.validator.js";
 
 const router = Router();
 
@@ -50,5 +52,7 @@ router.delete(
   validate(removeFavoriteDriverSchema),
   userController.removeFavoriteDriver
 );
+
+router.get("/me/ratings", validate(myRatingsQuerySchema), ratingController.myReceived);
 
 export default router;

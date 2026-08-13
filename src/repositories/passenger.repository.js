@@ -7,3 +7,7 @@ export function findByUserId(userId) {
 export function incrementCompletedRideStats(id) {
   return prisma.passenger.update({ where: { id }, data: { totalRides: { increment: 1 } } });
 }
+
+export function setAverageRating(id, averageRating) {
+  return prisma.passenger.update({ where: { id }, data: { averageRating } });
+}

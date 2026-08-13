@@ -1,6 +1,7 @@
 import { Router } from "express";
 import * as rideController from "../controllers/ride.controller.js";
 import * as paymentController from "../controllers/payment.controller.js";
+import * as ratingController from "../controllers/rating.controller.js";
 import { authenticate } from "../middlewares/auth.middleware.js";
 import { validate } from "../middlewares/validate.middleware.js";
 import {
@@ -12,6 +13,7 @@ import {
   idParamSchema,
 } from "../validators/ride.validator.js";
 import { payRideSchema } from "../validators/payment.validator.js";
+import { submitRatingSchema } from "../validators/rating.validator.js";
 
 const router = Router();
 
@@ -35,5 +37,8 @@ router.post("/:id/cancel", validate(cancelRideSchema), rideController.cancel);
 
 router.post("/:id/pay", validate(payRideSchema), paymentController.pay);
 router.get("/:id/payment", validate(idParamSchema), paymentController.getForRide);
+
+router.post("/:id/rating", validate(submitRatingSchema), ratingController.submit);
+router.get("/:id/ratings", validate(idParamSchema), ratingController.getForRide);
 
 export default router;

@@ -216,6 +216,25 @@ Mounted under `/api/v1/admin` (role: `ADMIN` only), each writing an `AuditLog` e
 
 `POST /api/v1/webhooks/stripe` is mounted **before** the global `express.json()` parser in `app.js` specifically so it can use `express.raw()` — Stripe signs the exact request bytes, and a body already parsed into an object no longer has the bytes the signature was computed over.
 
+## Ratings
+
+One `Rating` row per `(rideId, direction)` — the DB unique constraint is the real guarantee, a pre-check in `rating.service.js` just makes the failure a clean 409 instead of a raw Prisma error. `direction` is inferred from who's calling, never accepted as input: if the caller is the ride's passenger it's `PASSENGER_TO_DRIVER`, if the driver it's `DRIVER_TO_PASSENGER`, anything else is a 404 (same "don't confirm this ride exists to people uninvolved in it" reasoning as everywhere else a ride is looked up).
+
+`Driver.averageRating`/`Passenger.averageRating` are recomputed with a fresh `AVG()` over the `Rating` table on every new rating, not adjusted incrementally — cheap at this scale, and it can never drift out of sync with the ratings actually on file the way a running average could.
+
+Mounted under `/api/v1/rides` (extends the table above):
+
+| Method | Route | Notes |
+|---|---|---|
+| POST | `/:id/rating` | `{value: 1-5, comment?}`; ride must be `COMPLETED`; one rating per direction per ride |
+| GET | `/:id/ratings` | Both directions' ratings, for participants (or admin) |
+
+Mounted under `/api/v1/users`:
+
+| Method | Route | Notes |
+|---|---|---|
+| GET | `/me/ratings` | Ratings you've received, paginated, with the rater's first name |
+
 ## Known Limitations
 
 Deliberate, stated simplifications accumulated across phases — not gaps found by accident:
@@ -236,7 +255,7 @@ This backend is being built incrementally. Each phase is scoped, explained, and 
 - [x] **Phase 5** — Ride lifecycle
 - [x] **Phase 6** — Real-time location & sockets
 - [x] **Phase 7** — Payments & wallet
-- [ ] Ratings
+- [x] **Phase 8** — Ratings
 - [ ] Notifications & background jobs
 - [ ] Admin dashboard & analytics
 - [ ] Testing
