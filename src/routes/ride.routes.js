@@ -1,5 +1,6 @@
 import { Router } from "express";
 import * as rideController from "../controllers/ride.controller.js";
+import * as paymentController from "../controllers/payment.controller.js";
 import { authenticate } from "../middlewares/auth.middleware.js";
 import { validate } from "../middlewares/validate.middleware.js";
 import {
@@ -10,6 +11,7 @@ import {
   cancelRideSchema,
   idParamSchema,
 } from "../validators/ride.validator.js";
+import { payRideSchema } from "../validators/payment.validator.js";
 
 const router = Router();
 
@@ -30,5 +32,8 @@ router.post("/:id/arrived", validate(idParamSchema), rideController.arrived);
 router.post("/:id/start", validate(startRideSchema), rideController.start);
 router.post("/:id/complete", validate(idParamSchema), rideController.complete);
 router.post("/:id/cancel", validate(cancelRideSchema), rideController.cancel);
+
+router.post("/:id/pay", validate(payRideSchema), paymentController.pay);
+router.get("/:id/payment", validate(idParamSchema), paymentController.getForRide);
 
 export default router;

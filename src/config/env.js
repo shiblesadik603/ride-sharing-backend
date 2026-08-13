@@ -51,6 +51,12 @@ const envSchema = z.object({
   // Optional — unset means route/distance/ETA fall back to a straight-line
   // (Haversine) estimate instead of calling the Google Directions API.
   GOOGLE_MAPS_API_KEY: z.string().optional(),
+
+  // Optional — unset means CARD payments and wallet top-ups are rejected
+  // with a clear "not configured" error instead of crashing; WALLET and
+  // CASH ride payments work fully without Stripe.
+  STRIPE_SECRET_KEY: z.string().optional(),
+  STRIPE_WEBHOOK_SECRET: z.string().optional(),
 });
 
 const parsed = envSchema.safeParse(process.env);

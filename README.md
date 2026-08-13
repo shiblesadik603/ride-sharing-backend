@@ -161,7 +161,7 @@ Mounted under `/api/v1/drivers` (authenticated, driver-only):
 | POST | `/me/offline` | Removes from the online geoset |
 | POST | `/me/location` | REST-polled position ping; same underlying write as the `driver:location` socket event, see below |
 
-`estimateFare`/`computeRoute` fall back to a Haversine straight-line estimate (× 1.3 road factor) whenever `GOOGLE_MAPS_API_KEY` is unset **or** the Google call fails — a third-party outage degrades fare accuracy, it doesn't break ride requests. `actualFare` is set equal to `estimatedFare` at completion; recomputing it from a real GPS trail is Payments-phase work.
+`estimateFare`/`computeRoute` fall back to a Haversine straight-line estimate (× 1.3 road factor) whenever `GOOGLE_MAPS_API_KEY` is unset **or** the Google call fails — a third-party outage degrades fare accuracy, it doesn't break ride requests. `actualFare` is still set equal to `estimatedFare` at completion — recomputing it from a real GPS trail stayed out of scope through the Payments phase too; it's listed under Known Limitations below.
 
 ## Real-Time (Socket.IO)
 
@@ -183,6 +183,48 @@ Mounted under `/api/v1/drivers` (authenticated, driver-only):
 
 Verified with a real `socket.io-client` test harness, not just REST calls checked in isolation: a bad token was rejected at handshake, a ride request produced a `ride:offer` on the driver's actual socket, the OTP was present in `ride:accepted` (passenger) and absent from `ride:offer`/`ride:arrived`/etc. (driver), and a live `driver:location` emit reached the passenger's socket in real time.
 
+## Payments & Wallet
+
+**Three payment methods, one entry point.** `POST /rides/:id/pay` takes `{method: "CARD"|"WALLET"|"CASH", couponCode?}` — `provider` (what's actually charged) is derived from `method`, never trusted from the request body. CARD always means Stripe; there's no way for a client to claim a card charge went through Stripe when it didn't.
+
+**Wallet debits are race-safe the same way ride-accept is.** `wallet.repository.js: tryDebit` compiles `balance >= amount` (WHERE) and `decrement` (SET) into one atomic `UPDATE`, so two concurrent payment attempts against the same wallet can't both succeed against insufficient funds — Postgres serializes the competing updates, exactly like `ride.repository.js: tryAssignDriver` in Phase 5. Verified: an admin-initiated debit larger than the wallet balance was cleanly rejected, never partially applied.
+
+**No live Stripe credentials in this environment.** CARD payments, wallet top-ups, and Stripe refunds are fully implemented and follow Stripe's documented PaymentIntent/webhook/refund API shapes, but couldn't be exercised against Stripe's actual servers here — code-reviewed and syntax-verified, not integration-tested. Every other path (WALLET, CASH, coupons, refunds-to-wallet, the admin wallet-adjustment endpoint that made testing WALLET possible at all without Stripe) was verified live: full CASH payment, WALLET payment with a percentage coupon (math confirmed to the cent), partial refund, remainder refund, double-refund rejection, and over-refund rejection all ran against the real database. Set `STRIPE_SECRET_KEY`/`STRIPE_WEBHOOK_SECRET` in `.env` (test-mode keys are fine) to light up the CARD path — see `.env.example` for the local webhook-forwarding command.
+
+Mounted under `/api/v1/rides` (extends the Ride Lifecycle table above):
+
+| Method | Route | Notes |
+|---|---|---|
+| POST | `/:id/pay` | Ride must be `COMPLETED` and unpaid; CARD returns a `clientSecret` for Stripe.js to confirm client-side |
+| GET | `/:id/payment` | View payment + refund history for a ride you're a participant in |
+
+Mounted under `/api/v1/wallet` (authenticated):
+
+| Method | Route | Notes |
+|---|---|---|
+| GET | `/me` | Balance + paginated transaction ledger |
+| POST | `/me/topup` | Creates a Stripe PaymentIntent; wallet is credited only once the webhook confirms success, never from this call directly |
+
+Mounted under `/api/v1/admin` (role: `ADMIN` only), each writing an `AuditLog` entry:
+
+| Method | Route | Notes |
+|---|---|---|
+| GET | `/payments` \| `/payments/:id` | Filterable by status |
+| POST | `/payments/:id/refund` | Full or partial; STRIPE payments refund through Stripe, WALLET/CASH payments credit the payer's wallet (the only channel available to push money back ourselves) |
+| GET/POST/PATCH | `/coupons` | `PERCENTAGE` (capped at 100, optionally capped again by `maxDiscount`) or `FIXED`; `code` is immutable after creation |
+| POST | `/wallets/:userId/adjust` | Signed amount — credit or debit; the debit path reuses the same race-safe `tryDebit` |
+
+`POST /api/v1/webhooks/stripe` is mounted **before** the global `express.json()` parser in `app.js` specifically so it can use `express.raw()` — Stripe signs the exact request bytes, and a body already parsed into an object no longer has the bytes the signature was computed over.
+
+## Known Limitations
+
+Deliberate, stated simplifications accumulated across phases — not gaps found by accident:
+
+- **`actualFare` always equals `estimatedFare`.** Recomputing a fare from a real GPS trail (vs. the Haversine/Directions estimate taken at request time) needs the live location history the Real-Time phase streams but doesn't persist. Flagged since Phase 5, still true after Payments.
+- **No driver payout system.** `Driver.totalEarnings` accrues on every completed ride, but there's no Stripe Connect integration to actually pay a driver out to a bank account — that's KYC + Connect account onboarding, a substantially larger feature than this phase's scope.
+- **No heartbeat/staleness detection for "online" drivers.** A driver who force-quits without calling `/drivers/me/offline` stays in `geo:drivers:online` indefinitely. A proper fix (TTL-refreshing pings) overlaps with the Background Jobs phase.
+- **Coupon usage limits are check-then-write, not atomic.** Unlike wallet debits, a coupon's `usageLimit` could be oversold by a few redemptions under heavy concurrent use — an accepted tradeoff since the failure mode is marketing overspend, not lost funds (see the comment in `coupon.service.js`).
+
 ## Phases
 
 This backend is being built incrementally. Each phase is scoped, explained, and approved before the next begins.
@@ -193,7 +235,7 @@ This backend is being built incrementally. Each phase is scoped, explained, and 
 - [x] **Phase 4** — Vehicle management
 - [x] **Phase 5** — Ride lifecycle
 - [x] **Phase 6** — Real-time location & sockets
-- [ ] Payments & wallet
+- [x] **Phase 7** — Payments & wallet
 - [ ] Ratings
 - [ ] Notifications & background jobs
 - [ ] Admin dashboard & analytics

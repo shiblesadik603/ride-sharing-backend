@@ -6,6 +6,7 @@ const DETAIL_INCLUDE = {
   passenger: { include: { user: { select: { firstName: true, lastName: true, phone: true, avatarUrl: true } } } },
   driver: { include: { user: { select: { firstName: true, lastName: true, phone: true, avatarUrl: true } } } },
   vehicle: true,
+  payment: true,
 };
 
 export function create(data) {

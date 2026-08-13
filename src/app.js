@@ -17,6 +17,8 @@ import adminRoutes from "./routes/admin.routes.js";
 import vehicleRoutes from "./routes/vehicle.routes.js";
 import driverRoutes from "./routes/driver.routes.js";
 import rideRoutes from "./routes/ride.routes.js";
+import walletRoutes from "./routes/wallet.routes.js";
+import webhookRoutes from "./routes/webhook.routes.js";
 
 export const app = express();
 
@@ -33,6 +35,13 @@ app.use(
   })
 );
 app.use(compression());
+
+// Stripe signs the raw request body — this has to be mounted before the
+// global express.json() below, or by the time a webhook request reaches
+// it the body would already be parsed into an object, and signature
+// verification would fail against bytes that no longer exist.
+app.use("/api/v1/webhooks", webhookRoutes);
+
 app.use(express.json({ limit: "10kb" }));
 app.use(express.urlencoded({ extended: true, limit: "10kb" }));
 app.use(cookieParser());
@@ -63,9 +72,10 @@ app.use("/api/v1/admin", adminRoutes);
 app.use("/api/v1/vehicles", vehicleRoutes);
 app.use("/api/v1/drivers", driverRoutes);
 app.use("/api/v1/rides", rideRoutes);
+app.use("/api/v1/wallet", walletRoutes);
 
-// Further feature routers (payments, ratings, ...) will be mounted here,
-// under /api/v1, as each phase is built.
+// Further feature routers (ratings, notifications, ...) will be mounted
+// here, under /api/v1, as each phase is built.
 
 app.use(notFoundHandler);
 app.use(errorHandler);
