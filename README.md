@@ -157,11 +157,31 @@ Mounted under `/api/v1/drivers` (authenticated, driver-only):
 
 | Method | Route | Notes |
 |---|---|---|
-| POST | `/me/online` | Requires `verificationStatus=APPROVED` + ≥1 verified vehicle; registers position in `geo:drivers:online` (unused until the Real-Time phase adds push dispatch) |
+| POST | `/me/online` | Requires `verificationStatus=APPROVED` + ≥1 verified vehicle; registers position in `geo:drivers:online` |
 | POST | `/me/offline` | Removes from the online geoset |
-| POST | `/me/location` | REST-polled position ping; superseded (not replaced) by a socket stream next phase |
+| POST | `/me/location` | REST-polled position ping; same underlying write as the `driver:location` socket event, see below |
 
 `estimateFare`/`computeRoute` fall back to a Haversine straight-line estimate (× 1.3 road factor) whenever `GOOGLE_MAPS_API_KEY` is unset **or** the Google call fails — a third-party outage degrades fare accuracy, it doesn't break ride requests. `actualFare` is set equal to `estimatedFare` at completion; recomputing it from a real GPS trail is Payments-phase work.
+
+## Real-Time (Socket.IO)
+
+**Sockets are a push/telemetry layer on top of the REST services, not a second business-logic path.** Every state-changing action (accept, start, complete, cancel) stays REST-only — the socket layer only ever calls the *same* service functions REST controllers call, and pushes notifications from inside them. There's nothing a socket event can do that a REST call can't; sockets just make the REST side effects arrive without polling.
+
+**Auth**: a socket connects with `{ auth: { token: <access token> } }` — the same short-lived JWT as `Authorization: Bearer`, verified with the same function. No separate session concept; an expired access token means a dead socket, same as a rejected REST call. A bad/missing token gets a `connect_error`, never a connection.
+
+**Rooms**: exactly one per socket — `user:{userId}`, joined on connect. There is no `ride:{id}` room; every server-initiated push targets a specific userId directly (the ride record always has both participants' ids in hand at the point something needs pushing), which sidesteps needing a join-authorization check for room membership entirely.
+
+**Scaling**: `io.adapter()` runs on the Redis pub/sub pair set aside for exactly this back in Phase 1 (`redis` + `redisSubscriber`) — without it, an event emitted on the server instance handling the driver's connection would never reach the passenger's socket if they land on a different instance behind a load balancer.
+
+| Direction | Event | Notes |
+|---|---|---|
+| C→S | `driver:location` | `{lat, lng}` — same code path as `POST /drivers/me/location`; broadcasts to the active ride's passenger if one exists |
+| S→C | `ride:offer` | Pushed to nearby online, available, approved drivers with a matching verified vehicle when a ride is requested — closes the loop `geo:drivers:online` was built for in Phase 5. Best-effort only: if it reaches no one (all offline, all rejected), the ride is still sitting in `geo:rides:pending` for `GET /rides/nearby` to find |
+| S→C | `ride:accepted` \| `ride:arrived` \| `ride:started` \| `ride:completed` | Pushed to the passenger when the driver takes the corresponding REST action |
+| S→C | `ride:cancelled` | Pushed to whichever side *didn't* cancel |
+| S→C | `driver:location` | Pushed to the passenger of an active ride, from either the REST ping or the socket event above |
+
+Verified with a real `socket.io-client` test harness, not just REST calls checked in isolation: a bad token was rejected at handshake, a ride request produced a `ride:offer` on the driver's actual socket, the OTP was present in `ride:accepted` (passenger) and absent from `ride:offer`/`ride:arrived`/etc. (driver), and a live `driver:location` emit reached the passenger's socket in real time.
 
 ## Phases
 
@@ -172,7 +192,7 @@ This backend is being built incrementally. Each phase is scoped, explained, and 
 - [x] **Phase 3** — User management (passenger/driver/admin)
 - [x] **Phase 4** — Vehicle management
 - [x] **Phase 5** — Ride lifecycle
-- [ ] Real-time location & sockets
+- [x] **Phase 6** — Real-time location & sockets
 - [ ] Payments & wallet
 - [ ] Ratings
 - [ ] Notifications & background jobs

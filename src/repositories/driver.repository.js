@@ -30,6 +30,23 @@ export function list({ page, limit, verificationStatus }) {
   });
 }
 
+/** Lean projection for ride-offer dispatch — runs once per nearby driver
+ * on every new ride request, so it selects only the eligibility fields
+ * instead of the full admin detail view's vehicle/document join. */
+export function findByIdForDispatch(id) {
+  return prisma.driver.findUnique({
+    where: { id },
+    select: {
+      id: true,
+      userId: true,
+      isOnline: true,
+      isAvailable: true,
+      verificationStatus: true,
+      vehicles: { where: { isActive: true, isVerified: true }, select: { type: true } },
+    },
+  });
+}
+
 export function count({ verificationStatus }) {
   return prisma.driver.count({ where: verificationStatus ? { verificationStatus } : undefined });
 }

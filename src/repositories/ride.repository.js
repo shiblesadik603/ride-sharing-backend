@@ -32,6 +32,16 @@ export function findActiveByDriver(driverId) {
   });
 }
 
+/** Minimal-select variant for the location-ping hot path (fires on every
+ * GPS update while a ride is active) — avoids the full DETAIL_INCLUDE
+ * join for a call site that only needs one field off it. */
+export function findActiveByDriverWithPassengerId(driverId) {
+  return prisma.ride.findFirst({
+    where: { driverId, status: { in: ACTIVE_STATUSES } },
+    select: { id: true, status: true, passenger: { select: { userId: true } } },
+  });
+}
+
 /**
  * The concurrency guard for driver matching: multiple drivers can call
  * accept on the same REQUESTED ride at once, but only the update whose

@@ -1,7 +1,9 @@
 import { ApiError } from "../utils/ApiError.js";
 import * as driverRepository from "../repositories/driver.repository.js";
 import * as vehicleRepository from "../repositories/vehicle.repository.js";
+import * as rideRepository from "../repositories/ride.repository.js";
 import * as geoService from "./geo.service.js";
+import { emitToUser } from "../sockets/socket.emitter.js";
 
 async function getOwnDriver(userId) {
   const driver = await driverRepository.findByUserId(userId);
@@ -36,10 +38,10 @@ export async function goOffline(userId) {
 }
 
 /**
- * REST-polled location updates (client pings every few seconds). The
- * Real-Time phase adds a Socket.IO stream for this same write — this
- * endpoint stays as the fallback/initial-registration path, since a
- * socket connection can drop mid-ride and a client needs a way back in.
+ * Called from both the REST endpoint and the `driver:location` socket
+ * event — one code path, two entry points, so a client that falls back to
+ * REST after a dropped socket connection gets identical behavior
+ * (including the live broadcast below), not a degraded version of it.
  */
 export async function updateLocation(userId, { lat, lng }) {
   const driver = await getOwnDriver(userId);
@@ -49,4 +51,16 @@ export async function updateLocation(userId, { lat, lng }) {
 
   await driverRepository.updateLastKnownLocation(driver.id, lat, lng);
   await geoService.setDriverLocation(driver.id, lat, lng);
+
+  // REQUESTED doesn't apply here (no driver assigned yet), so this only
+  // ever fires for ACCEPTED/ARRIVED/IN_PROGRESS — exactly when a
+  // passenger is actually waiting on live position.
+  const activeRide = await rideRepository.findActiveByDriverWithPassengerId(driver.id);
+  if (activeRide && activeRide.status !== "REQUESTED") {
+    emitToUser(activeRide.passenger.userId, "driver:location", {
+      rideId: activeRide.id,
+      lat,
+      lng,
+    });
+  }
 }

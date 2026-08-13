@@ -3,13 +3,14 @@ import { app } from "./app.js";
 import { env } from "./config/env.js";
 import { logger } from "./config/logger.js";
 import { connectDatabase, disconnectDatabase } from "./config/database.js";
-import { redis } from "./config/redis.js";
+import { redis, redisSubscriber } from "./config/redis.js";
+import { initSockets } from "./sockets/index.js";
 
 const server = http.createServer(app);
 
-// Socket.IO will attach to this same `server` instance in the Real-Time
-// phase, so ride/location events share the HTTP server rather than
-// standing up a second port.
+// Socket.IO attaches to this same `server` instance — ride/location events
+// share the HTTP server rather than standing up a second port.
+initSockets(server);
 
 async function start() {
   try {
@@ -33,6 +34,7 @@ async function shutdown(signal) {
   server.close(async () => {
     await disconnectDatabase();
     redis.disconnect();
+    redisSubscriber.disconnect();
     logger.info("Shutdown complete");
     process.exit(0);
   });

@@ -10,6 +10,7 @@ import * as driverRepository from "../repositories/driver.repository.js";
 import * as vehicleRepository from "../repositories/vehicle.repository.js";
 import * as geoService from "./geo.service.js";
 import * as mapsService from "./maps.service.js";
+import { emitToUser } from "../sockets/socket.emitter.js";
 
 const DEFAULT_SEARCH_RADIUS_KM = 5;
 const CANCELLABLE_STATUSES = ["REQUESTED", "ACCEPTED", "ARRIVED"];
@@ -103,8 +104,54 @@ export async function requestRide(userId, data) {
 
   await rideStatusLogRepository.record(ride.id, "REQUESTED");
   await geoService.addPendingRide(ride.id, data.pickupLat, data.pickupLng);
+  await dispatchRideOffer(ride);
 
   return ride;
+}
+
+/**
+ * Push notification is a best-effort convenience on top of pull-based
+ * polling, not a replacement for it — a driver whose socket is
+ * disconnected (or who's on a version of the app predating push) still
+ * finds this ride via GET /rides/nearby. If this dispatch silently
+ * reaches zero drivers (all offline, all rejected already, whatever),
+ * the ride simply stays REQUESTED and discoverable, exactly as it would
+ * have without this function existing at all.
+ *
+ * N+1 driver lookups here (one per nearby candidate) is fine at demo
+ * scale; a production dispatcher would batch this into a single query
+ * against `geo:drivers:online` results.
+ */
+async function dispatchRideOffer(ride) {
+  const nearby = await geoService.findNearbyOnlineDrivers(
+    ride.pickupLat,
+    ride.pickupLng,
+    DEFAULT_SEARCH_RADIUS_KM
+  );
+  if (nearby.length === 0) return;
+
+  const distanceById = new Map(nearby.map((n) => [n.id, n.distanceKm]));
+  const candidates = await Promise.all(
+    nearby.map((n) => driverRepository.findByIdForDispatch(n.id))
+  );
+
+  const offer = sanitizeRideOffer(ride, 0);
+
+  for (const driver of candidates) {
+    const eligible =
+      driver &&
+      driver.isOnline &&
+      driver.isAvailable &&
+      driver.verificationStatus === "APPROVED" &&
+      driver.vehicles.some((v) => v.type === ride.requestedVehicleType);
+
+    if (eligible) {
+      emitToUser(driver.userId, "ride:offer", {
+        ...offer,
+        distanceKm: distanceById.get(driver.id),
+      });
+    }
+  }
 }
 
 export async function getRide(userId, userRole, rideId) {
@@ -210,7 +257,9 @@ export async function acceptRide(userId, rideId) {
   await geoService.removePendingRide(rideId);
   await rideStatusLogRepository.record(rideId, "ACCEPTED");
 
-  return sanitizeRide(await rideRepository.findById(rideId), "DRIVER");
+  const updated = await rideRepository.findById(rideId);
+  emitToUser(updated.passenger.userId, "ride:accepted", sanitizeRide(updated, "PASSENGER"));
+  return sanitizeRide(updated, "DRIVER");
 }
 
 export async function rejectRide(userId, rideId) {
@@ -226,6 +275,7 @@ export async function markArrived(userId, rideId) {
     arrivedAt: new Date(),
   });
   await rideStatusLogRepository.record(ride.id, "ARRIVED");
+  emitToUser(updated.passenger.userId, "ride:arrived", sanitizeRide(updated, "PASSENGER"));
   return sanitizeRide(updated, "DRIVER");
 }
 
@@ -258,6 +308,7 @@ export async function startRide(userId, rideId, otpCode) {
     otpVerifiedAt: new Date(),
   });
   await rideStatusLogRepository.record(ride.id, "IN_PROGRESS");
+  emitToUser(updated.passenger.userId, "ride:started", sanitizeRide(updated, "PASSENGER"));
   return sanitizeRide(updated, "DRIVER");
 }
 
@@ -283,6 +334,7 @@ export async function completeRide(userId, rideId) {
   ]);
 
   await rideStatusLogRepository.record(ride.id, "COMPLETED");
+  emitToUser(updatedRide.passenger.userId, "ride:completed", sanitizeRide(updatedRide, "PASSENGER"));
   return sanitizeRide(updatedRide, "DRIVER");
 }
 
@@ -311,6 +363,14 @@ export async function cancelRide(userId, rideId, reason) {
   }
   await geoService.removePendingRide(ride.id);
   await rideStatusLogRepository.record(ride.id, "CANCELLED", reason ? { reason } : undefined);
+
+  // Notify whichever side didn't do the cancelling — the initiator already
+  // has the answer from this call's own REST response.
+  if (cancelledBy === "PASSENGER" && updated.driver) {
+    emitToUser(updated.driver.userId, "ride:cancelled", sanitizeRide(updated, "DRIVER"));
+  } else if (cancelledBy === "DRIVER") {
+    emitToUser(updated.passenger.userId, "ride:cancelled", sanitizeRide(updated, "PASSENGER"));
+  }
 
   return sanitizeRide(updated, cancelledBy);
 }
