@@ -8,8 +8,10 @@ import * as rideRepository from "../repositories/ride.repository.js";
 import * as walletRepository from "../repositories/wallet.repository.js";
 import * as couponRedemptionRepository from "../repositories/couponRedemption.repository.js";
 import * as auditLogRepository from "../repositories/auditLog.repository.js";
+import * as userRepository from "../repositories/user.repository.js";
 import * as couponService from "./coupon.service.js";
 import * as walletService from "./wallet.service.js";
+import * as notificationService from "./notification.service.js";
 
 /**
  * The only entry point for paying off a completed ride. `method` picks
@@ -253,6 +255,17 @@ export async function refundPayment(paymentId, { amount, reason }, actor) {
     metadata: { amount: refundAmount, reason },
     ipAddress: actor.ipAddress,
   });
+
+  const payer = await userRepository.findById(payment.payerId);
+  if (payer) {
+    await notificationService.notify({
+      userId: payer.id,
+      email: payer.email,
+      channel: "EMAIL",
+      title: "Refund processed",
+      html: `<p>A refund of $${refundAmount.toFixed(2)} has been processed for your ride payment.</p><p>Reason: ${reason}</p>`,
+    });
+  }
 
   return { payment: updatedPayment, refund };
 }

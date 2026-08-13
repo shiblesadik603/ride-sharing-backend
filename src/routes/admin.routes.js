@@ -4,6 +4,7 @@ import * as verificationController from "../controllers/verification.controller.
 import * as adminPaymentController from "../controllers/adminPayment.controller.js";
 import * as couponController from "../controllers/coupon.controller.js";
 import * as walletController from "../controllers/wallet.controller.js";
+import * as adminReportController from "../controllers/adminReport.controller.js";
 import { authenticate, authorize } from "../middlewares/auth.middleware.js";
 import { validate } from "../middlewares/validate.middleware.js";
 import { listUsersQuerySchema, updateUserStatusSchema, idParamSchema } from "../validators/user.validator.js";
@@ -20,6 +21,7 @@ import {
   listCouponsQuerySchema,
 } from "../validators/coupon.validator.js";
 import { adjustWalletSchema } from "../validators/wallet.validator.js";
+import { reportRangeQuerySchema } from "../validators/report.validator.js";
 
 const router = Router();
 
@@ -74,6 +76,13 @@ router.post(
   "/wallets/:userId/adjust",
   validate(adjustWalletSchema),
   walletController.adjustBalance
+);
+
+router.get("/reports/summary", validate(reportRangeQuerySchema), adminReportController.getSummary);
+router.post(
+  "/reports/summary/send",
+  validate(reportRangeQuerySchema),
+  adminReportController.sendSummary
 );
 
 export default router;

@@ -1,5 +1,5 @@
 import { z } from "zod";
-import { idParamSchema } from "./common.validator.js";
+import { idParamSchema, booleanQueryParam } from "./common.validator.js";
 
 export { idParamSchema };
 
@@ -81,7 +81,7 @@ export const listUsersQuerySchema = z.object({
     page: z.coerce.number().int().positive().default(1),
     limit: z.coerce.number().int().positive().max(100).default(20),
     role: z.enum(["PASSENGER", "DRIVER", "ADMIN"]).optional(),
-    isActive: z.coerce.boolean().optional(),
+    isActive: booleanQueryParam.optional(),
     search: z.string().trim().min(1).max(100).optional(),
   }),
 });

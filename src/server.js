@@ -4,7 +4,9 @@ import { env } from "./config/env.js";
 import { logger } from "./config/logger.js";
 import { connectDatabase, disconnectDatabase } from "./config/database.js";
 import { redis, redisSubscriber } from "./config/redis.js";
+import { queueConnection } from "./config/queue.js";
 import { initSockets } from "./sockets/index.js";
+import { initJobs, closeJobs } from "./jobs/index.js";
 
 const server = http.createServer(app);
 
@@ -15,6 +17,7 @@ initSockets(server);
 async function start() {
   try {
     await connectDatabase();
+    await initJobs();
     server.listen(env.PORT, () => {
       logger.info(`Server running in ${env.NODE_ENV} mode on port ${env.PORT}`);
     });
@@ -32,9 +35,11 @@ async function start() {
 async function shutdown(signal) {
   logger.info(`${signal} received, shutting down gracefully`);
   server.close(async () => {
+    await closeJobs();
     await disconnectDatabase();
     redis.disconnect();
     redisSubscriber.disconnect();
+    queueConnection.disconnect();
     logger.info("Shutdown complete");
     process.exit(0);
   });

@@ -56,3 +56,25 @@ export function findValidVerificationToken(tokenHash, type) {
 export function markVerificationTokenUsed(id) {
   return prisma.verificationToken.update({ where: { id }, data: { usedAt: new Date() } });
 }
+
+// ---------------------------------------------------------------------------
+// Cleanup — run by jobs/processors/cleanup.processor.js on a schedule.
+// Deleting these rows is purely housekeeping: an expired or revoked
+// refresh token, and a used or expired verification token, can never
+// authenticate anything ever again, so removing them changes nothing
+// about the system's behavior — only its table size.
+// ---------------------------------------------------------------------------
+
+export async function deleteExpiredRefreshTokens() {
+  const result = await prisma.refreshToken.deleteMany({
+    where: { OR: [{ expiresAt: { lt: new Date() } }, { revokedAt: { not: null } }] },
+  });
+  return result.count;
+}
+
+export async function deleteExpiredVerificationTokens() {
+  const result = await prisma.verificationToken.deleteMany({
+    where: { OR: [{ expiresAt: { lt: new Date() } }, { usedAt: { not: null } }] },
+  });
+  return result.count;
+}

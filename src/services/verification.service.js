@@ -3,6 +3,14 @@ import * as driverRepository from "../repositories/driver.repository.js";
 import * as vehicleRepository from "../repositories/vehicle.repository.js";
 import * as vehicleDocumentRepository from "../repositories/vehicleDocument.repository.js";
 import * as auditLogRepository from "../repositories/auditLog.repository.js";
+import * as userRepository from "../repositories/user.repository.js";
+import * as notificationService from "./notification.service.js";
+
+const DECISION_COPY = {
+  APPROVED: "Your driver application has been approved — you can now go online and accept rides.",
+  REJECTED: "Your driver application was not approved.",
+  SUSPENDED: "Your driver account has been suspended.",
+};
 
 export async function listDrivers({ page, limit, verificationStatus }) {
   const [drivers, total] = await Promise.all([
@@ -36,6 +44,20 @@ export async function reviewDriver(driverId, verificationStatus, reason, actor) 
     metadata: reason ? { reason } : undefined,
     ipAddress: actor.ipAddress,
   });
+
+  // Best-effort: a driver should hear about this even if they're not
+  // online to see it live, but a notification hiccup shouldn't undo an
+  // already-recorded, audited decision.
+  const user = await userRepository.findById(driver.userId);
+  if (user) {
+    await notificationService.notify({
+      userId: user.id,
+      email: user.email,
+      channel: "EMAIL",
+      title: "Driver application update",
+      html: `<p>${DECISION_COPY[verificationStatus]}</p>${reason ? `<p>Note: ${reason}</p>` : ""}`,
+    });
+  }
 
   return updated;
 }

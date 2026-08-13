@@ -13,9 +13,15 @@ import { sendVerificationEmail, sendPasswordResetEmail } from "./email.service.j
 const EMAIL_VERIFICATION_TTL_MS = 24 * 60 * 60 * 1000; // 24h
 const PASSWORD_RESET_TTL_MS = 60 * 60 * 1000; // 1h
 
-/** Registration and login should never fail because the mail provider is
- * down — the account/token state is already committed by the time we send,
- * so a delivery failure is logged and swallowed, not surfaced to the user. */
+/**
+ * Registration and login should never fail because notifying the user is
+ * having a bad moment. Since email.service.js now only enqueues (actual
+ * sending happens in the worker, with its own retries), this mainly
+ * guards against the enqueue call itself failing — e.g. Redis briefly
+ * unreachable — which is rarer than an SMTP failure used to be, but the
+ * same principle applies: the account/token state is already committed,
+ * so a notification hiccup is logged and swallowed, not surfaced to the user.
+ */
 async function safeSendEmail(sendFn, ...args) {
   try {
     await sendFn(...args);
@@ -54,7 +60,7 @@ export async function register({ email, password, firstName, lastName, phone }) 
     type: "EMAIL_VERIFICATION",
     expiresAt: new Date(Date.now() + EMAIL_VERIFICATION_TTL_MS),
   });
-  await safeSendEmail(sendVerificationEmail, user.email, rawToken);
+  await safeSendEmail(sendVerificationEmail, user, rawToken);
 
   const session = await issueSession(user);
   return { user: sanitizeUser(user), ...session };
@@ -117,7 +123,7 @@ export async function forgotPassword({ email }) {
     type: "PASSWORD_RESET",
     expiresAt: new Date(Date.now() + PASSWORD_RESET_TTL_MS),
   });
-  await safeSendEmail(sendPasswordResetEmail, user.email, rawToken);
+  await safeSendEmail(sendPasswordResetEmail, user, rawToken);
 }
 
 export async function resetPassword({ token, newPassword }) {
@@ -162,7 +168,7 @@ export async function resendVerificationEmail({ email }) {
     type: "EMAIL_VERIFICATION",
     expiresAt: new Date(Date.now() + EMAIL_VERIFICATION_TTL_MS),
   });
-  await safeSendEmail(sendVerificationEmail, user.email, rawToken);
+  await safeSendEmail(sendVerificationEmail, user, rawToken);
 }
 
 export async function googleAuth({ idToken, deviceInfo, ipAddress }) {

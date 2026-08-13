@@ -235,14 +235,53 @@ Mounted under `/api/v1/users`:
 |---|---|---|
 | GET | `/me/ratings` | Ratings you've received, paginated, with the rater's first name |
 
+## Notifications & Background Jobs
+
+**BullMQ runs on its own Redis connection**, separate from the general-purpose `redis` client (`config/redis.js`) — BullMQ's blocking commands need `maxRetriesPerRequest: null`, which would be the wrong setting for every other command sharing that client. `config/queue.js` holds this dedicated connection; `jobs/queues.js` defines three queues (`email`, `maintenance`, `report`) on top of it, each with 3-attempt exponential-backoff retry by default — BullMQ's own answer to "retry failed notifications," not a hand-rolled retry loop.
+
+**`notification.service.js: notify()` is the one place every other service goes through to notify a user.** It always persists a `Notification` row first (the audit trail behind `GET /users/me/notifications`), then dispatches per channel:
+- `EMAIL` — enqueued, actually sent by `jobs/processors/email.processor.js` (the swap promised back in Phase 2's `email.service.js` comment — sending used to happen inline, right there).
+- `SOCKET` — immediate, over the Phase 6 socket layer; nothing about a live socket emit benefits from a queue.
+- `PUSH` — recorded and marked `FAILED` immediately, not queued, not retried. This is an honest stub: push needs FCM/APNs project credentials this environment doesn't have, and retrying can't fix a permanently unconfigured channel — pretending otherwise would be worse than saying so.
+
+**Three real integration points**, not a sprawling retrofit of every event in the app: auth emails (verification, password reset — moved from synchronous to queued), driver verification decisions (`verification.service.js`, approve/reject/suspend), and payment refunds (`payment.service.js`). Live ride-status push during an active ride (Phase 6) deliberately stays untouched — that's ephemeral by design, this is a persistent inbox, and conflating the two would be the wrong abstraction.
+
+**Repeatable jobs, registered idempotently on every boot:**
+
+| Job | Schedule | What it does |
+|---|---|---|
+| `expired-tokens` (maintenance queue) | daily 3am | Deletes expired/revoked refresh tokens and used/expired verification tokens — pure housekeeping, changes no behavior |
+| `daily-summary` (report queue) | daily 6am | Computes a 24h ops summary (rides, revenue, signups, online drivers) and emails every active admin |
+
+Both use BullMQ v6's `upsertJobScheduler` API — **not** the pre-v6 `queue.add(name, data, {repeat: {pattern}})` idiom, which this project tried first and which silently runs the job once immediately instead of scheduling it, a real bug caught by noticing both jobs fire on the very first server boot when they shouldn't have. Verified idempotent across restarts by checking `queue.getJobSchedulers()` stays at one entry, not growing with each boot.
+
+`GET /admin/reports/summary` computes the same numbers synchronously for on-demand inspection (no emailing); `POST /admin/reports/summary/send` runs the full real pipeline — generate, notify, queue, worker-send — immediately, which is how this was actually verified without waiting for 6am.
+
+Mounted under `/api/v1/users`:
+
+| Method | Route | Notes |
+|---|---|---|
+| GET | `/me/notifications` | Paginated, filterable by `isRead` |
+| PATCH | `/me/notifications/:id/read` | Ownership-checked |
+
+Mounted under `/api/v1/admin`:
+
+| Method | Route | Notes |
+|---|---|---|
+| GET | `/reports/summary` | `?from=&to=`, defaults to the last 24h |
+| POST | `/reports/summary/send` | Same computation, also emails every active admin |
+
+**A second real bug, unrelated to jobs, found while testing this phase**: `?isRead=false` on the notifications endpoint was matching *read* notifications, not unread ones. `z.coerce.boolean()` on a query string runs `Boolean("false")`, and any non-empty string is truthy in JavaScript — so `"false"` coerced to `true`. This exact pattern had been sitting unnoticed in two earlier phases (`GET /admin/users?isActive=false` since Phase 3, `GET /admin/coupons?isActive=false` since Phase 7) — neither had ever been tested with the `false` case specifically. Fixed once, centrally, in `common.validator.js: booleanQueryParam`, and applied to all three call sites.
+
 ## Known Limitations
 
 Deliberate, stated simplifications accumulated across phases — not gaps found by accident:
 
 - **`actualFare` always equals `estimatedFare`.** Recomputing a fare from a real GPS trail (vs. the Haversine/Directions estimate taken at request time) needs the live location history the Real-Time phase streams but doesn't persist. Flagged since Phase 5, still true after Payments.
 - **No driver payout system.** `Driver.totalEarnings` accrues on every completed ride, but there's no Stripe Connect integration to actually pay a driver out to a bank account — that's KYC + Connect account onboarding, a substantially larger feature than this phase's scope.
-- **No heartbeat/staleness detection for "online" drivers.** A driver who force-quits without calling `/drivers/me/offline` stays in `geo:drivers:online` indefinitely. A proper fix (TTL-refreshing pings) overlaps with the Background Jobs phase.
+- **No heartbeat/staleness detection for "online" drivers.** A driver who force-quits without calling `/drivers/me/offline` stays in `geo:drivers:online` indefinitely. Now that Background Jobs exists, this is straightforward to add (a repeatable job sweeping stale `lastLocationAt` timestamps) — it just wasn't what got built this phase; the two jobs implemented (token cleanup, daily report) were chosen to match the spec's explicit examples.
 - **Coupon usage limits are check-then-write, not atomic.** Unlike wallet debits, a coupon's `usageLimit` could be oversold by a few redemptions under heavy concurrent use — an accepted tradeoff since the failure mode is marketing overspend, not lost funds (see the comment in `coupon.service.js`).
+- **Job workers run in the same process as the HTTP server.** Appropriate at this project's scale; a production deployment handling meaningful job volume would typically run `jobs/index.js`'s workers as a separate process so a burst of email jobs can't compete with API requests for event-loop time. Nothing about the processors themselves would need to change — see the comment in `jobs/index.js`.
 
 ## Phases
 
@@ -256,7 +295,7 @@ This backend is being built incrementally. Each phase is scoped, explained, and 
 - [x] **Phase 6** — Real-time location & sockets
 - [x] **Phase 7** — Payments & wallet
 - [x] **Phase 8** — Ratings
-- [ ] Notifications & background jobs
+- [x] **Phase 9** — Notifications & background jobs
 - [ ] Admin dashboard & analytics
 - [ ] Testing
 - [ ] API documentation (Swagger)
