@@ -14,7 +14,17 @@ export function validate(schema) {
     });
 
     if (parsed.body) req.body = parsed.body;
-    if (parsed.query) req.query = parsed.query;
+    // Express 5 made req.query a getter-only accessor — `req.query = ...`
+    // throws. Redefining the property is the supported way to still swap
+    // in the coerced/defaulted object Zod produced.
+    if (parsed.query) {
+      Object.defineProperty(req, "query", {
+        value: parsed.query,
+        writable: true,
+        configurable: true,
+        enumerable: true,
+      });
+    }
     if (parsed.params) req.params = parsed.params;
 
     next();

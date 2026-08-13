@@ -79,13 +79,44 @@ All routes mounted under `/api/v1/auth`:
 
 Access tokens: `Authorization: Bearer <token>`, 15 min lifetime. Refresh tokens: httpOnly cookie for web clients, also returned in the JSON body for native/mobile clients that can't use cookies.
 
+## User Management
+
+All routes below require `Authorization: Bearer <access token>`.
+
+Mounted under `/api/v1/users` (self-service, any authenticated role):
+
+| Method | Route | Notes |
+|---|---|---|
+| GET | `/me` | Profile + passenger/driver/wallet summary |
+| PATCH | `/me` | Partial update: firstName, lastName, phone |
+| POST | `/me/change-password` | Requires current password; revokes all sessions on success |
+| POST | `/me/become-driver` | One-way PASSENGER → DRIVER upgrade; keeps the passenger profile |
+| GET/POST | `/me/saved-locations` | Passenger-only, ownership-checked |
+| PATCH/DELETE | `/me/saved-locations/:id` | Passenger-only, ownership-checked |
+| GET/POST | `/me/favorite-drivers` | Passenger-only |
+| DELETE | `/me/favorite-drivers/:driverId` | Passenger-only |
+
+Mounted under `/api/v1/admin` (role: `ADMIN` only):
+
+| Method | Route | Notes |
+|---|---|---|
+| GET | `/users` | Paginated, filterable by role/isActive, searchable | 
+| GET | `/users/:id` | Full profile |
+| PATCH | `/users/:id/status` | Activate/deactivate; deactivation revokes all sessions; writes an `AuditLog` entry |
+
+Admin accounts have no signup endpoint by design — provision one out-of-band:
+
+```bash
+npm run seed:admin -- <email> <password> <firstName> <lastName>
+```
+
 ## Phases
 
 This backend is being built incrementally. Each phase is scoped, explained, and approved before the next begins.
 
 - [x] **Phase 1** — Planning, architecture, folder structure, database design
 - [x] **Phase 2** — Authentication
-- [ ] Phase 3 — User management (passenger/driver/admin)
+- [x] **Phase 3** — User management (passenger/driver/admin)
 - [ ] Vehicle management
 - [ ] Ride lifecycle
 - [ ] Real-time location & sockets

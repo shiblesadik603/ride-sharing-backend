@@ -58,3 +58,70 @@ export function linkGoogleId(userId, googleId) {
 export function touchLastLogin(userId) {
   return prisma.user.update({ where: { id: userId }, data: { lastLoginAt: new Date() } });
 }
+
+/** Includes role-extension summaries so `GET /users/me` doesn't need a
+ * second round trip to show a passenger their rating or a driver their
+ * online status. */
+export function findByIdWithProfile(id) {
+  return prisma.user.findUnique({
+    where: { id },
+    include: {
+      passenger: true,
+      driver: true,
+      wallet: { select: { balance: true, currency: true } },
+    },
+  });
+}
+
+export function updateProfile(userId, data) {
+  return prisma.user.update({ where: { id: userId }, data });
+}
+
+/**
+ * Role upgrade, not a fresh signup — the User row and its Passenger/Wallet
+ * already exist. Only adds the Driver extension and flips `role`; the
+ * service layer is responsible for rejecting this when the user is already
+ * a driver or is an admin.
+ */
+export function promoteToDriver(userId, { licenseNumber, licenseExpiry }) {
+  return prisma.user.update({
+    where: { id: userId },
+    data: {
+      role: "DRIVER",
+      driver: { create: { licenseNumber, licenseExpiry } },
+    },
+    include: { driver: true },
+  });
+}
+
+function buildUserListWhere({ role, isActive, search }) {
+  return {
+    ...(role && { role }),
+    ...(isActive !== undefined && { isActive }),
+    ...(search && {
+      OR: [
+        { email: { contains: search, mode: "insensitive" } },
+        { firstName: { contains: search, mode: "insensitive" } },
+        { lastName: { contains: search, mode: "insensitive" } },
+      ],
+    }),
+  };
+}
+
+export function listUsers({ page, limit, role, isActive, search }) {
+  const where = buildUserListWhere({ role, isActive, search });
+  return prisma.user.findMany({
+    where,
+    skip: (page - 1) * limit,
+    take: limit,
+    orderBy: { createdAt: "desc" },
+  });
+}
+
+export function countUsers({ role, isActive, search }) {
+  return prisma.user.count({ where: buildUserListWhere({ role, isActive, search }) });
+}
+
+export function setActiveStatus(userId, isActive) {
+  return prisma.user.update({ where: { id: userId }, data: { isActive } });
+}

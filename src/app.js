@@ -12,6 +12,8 @@ import { notFoundHandler } from "./middlewares/notFound.middleware.js";
 import { errorHandler } from "./middlewares/error.middleware.js";
 import healthRoutes from "./routes/health.routes.js";
 import authRoutes from "./routes/auth.routes.js";
+import userRoutes from "./routes/user.routes.js";
+import adminRoutes from "./routes/admin.routes.js";
 
 export const app = express();
 
@@ -53,9 +55,11 @@ app.use(
 
 app.use("/health", healthRoutes);
 app.use("/api/v1/auth", authRoutes);
+app.use("/api/v1/users", userRoutes);
+app.use("/api/v1/admin", adminRoutes);
 
-// Further feature routers (users, rides, ...) will be mounted here, under
-// /api/v1, as each phase is built.
+// Further feature routers (rides, vehicles, ...) will be mounted here,
+// under /api/v1, as each phase is built.
 
 app.use(notFoundHandler);
 app.use(errorHandler);
