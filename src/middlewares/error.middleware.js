@@ -1,5 +1,6 @@
 import { Prisma } from "@prisma/client";
 import { ZodError } from "zod";
+import { MulterError } from "multer";
 import { ApiError } from "../utils/ApiError.js";
 import { logger } from "../config/logger.js";
 import { isProduction } from "../config/env.js";
@@ -15,6 +16,12 @@ function normalizeError(err) {
 
   if (err instanceof ZodError) {
     return ApiError.badRequest("Validation failed", err.flatten().fieldErrors);
+  }
+
+  if (err instanceof MulterError) {
+    const message =
+      err.code === "LIMIT_FILE_SIZE" ? "File must be 5MB or smaller" : err.message;
+    return ApiError.badRequest(message);
   }
 
   if (err instanceof Prisma.PrismaClientKnownRequestError) {

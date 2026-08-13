@@ -110,6 +110,31 @@ Admin accounts have no signup endpoint by design — provision one out-of-band:
 npm run seed:admin -- <email> <password> <firstName> <lastName>
 ```
 
+## Vehicle Management
+
+Mounted under `/api/v1/vehicles` (driver-only, ownership-checked):
+
+| Method | Route | Notes |
+|---|---|---|
+| GET/POST | `/` | List / add a vehicle |
+| GET/PATCH/DELETE | `/:id` | DELETE deactivates (`isActive=false`), never hard-deletes |
+| GET/POST | `/:id/documents` | List / upload a document, `multipart/form-data`, field `document` (PDF/JPEG/PNG, 5MB max) |
+| GET | `/:id/documents/:documentId/file` | Download own document |
+| DELETE | `/:id/documents/:documentId` | Fails with 409 once the document is `APPROVED` |
+
+Editing a verified vehicle's identity fields (`make`, `model`, `year`, `plateNumber`) automatically resets `isVerified` to `false` — a changed plate is no longer what was actually verified.
+
+Admin review, mounted under `/api/v1/admin` (role: `ADMIN` only), each writing an `AuditLog` entry:
+
+| Method | Route | Notes |
+|---|---|---|
+| GET | `/drivers` | Paginated, filterable by `verificationStatus` |
+| GET | `/drivers/:id` | Full detail: identity, vehicles, documents |
+| PATCH | `/drivers/:id/verification` | `APPROVED` \| `REJECTED` \| `SUSPENDED`, optional `reason` |
+| PATCH | `/vehicles/:id/verification` | Approve/unapprove a vehicle |
+| PATCH | `/vehicle-documents/:id/review` | `APPROVED` \| `REJECTED` |
+| GET | `/vehicle-documents/:id/file` | Download any document for review |
+
 ## Phases
 
 This backend is being built incrementally. Each phase is scoped, explained, and approved before the next begins.
@@ -117,7 +142,7 @@ This backend is being built incrementally. Each phase is scoped, explained, and 
 - [x] **Phase 1** — Planning, architecture, folder structure, database design
 - [x] **Phase 2** — Authentication
 - [x] **Phase 3** — User management (passenger/driver/admin)
-- [ ] Vehicle management
+- [x] **Phase 4** — Vehicle management
 - [ ] Ride lifecycle
 - [ ] Real-time location & sockets
 - [ ] Payments & wallet

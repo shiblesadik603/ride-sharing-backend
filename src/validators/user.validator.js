@@ -1,4 +1,7 @@
 import { z } from "zod";
+import { idParamSchema } from "./common.validator.js";
+
+export { idParamSchema };
 
 const passwordSchema = z
   .string()
@@ -61,10 +64,6 @@ export const updateSavedLocationSchema = z.object({
     .extend({ lat: coordSchema.shape.lat.optional(), lng: coordSchema.shape.lng.optional() })
     .partial()
     .refine((data) => Object.keys(data).length > 0, "At least one field is required"),
-});
-
-export const idParamSchema = z.object({
-  params: z.object({ id: z.string().min(1) }),
 });
 
 export const addFavoriteDriverSchema = z.object({
