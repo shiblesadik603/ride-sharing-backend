@@ -17,7 +17,11 @@ initSockets(server);
 async function start() {
   try {
     await connectDatabase();
-    await initJobs();
+    // ENABLE_JOBS=false when a dedicated `worker` process (src/worker.js)
+    // handles the queues instead — running both would mean every job gets
+    // picked up by whichever process's Worker happens to poll first,
+    // silently doubling side effects like sent emails.
+    if (env.ENABLE_JOBS) await initJobs();
     server.listen(env.PORT, () => {
       logger.info(`Server running in ${env.NODE_ENV} mode on port ${env.PORT}`);
     });

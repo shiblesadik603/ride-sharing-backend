@@ -1,0 +1,91 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+
+    # Real Postgres and Redis service containers, not mocks — the same
+    # "test against real infrastructure" approach this project has used
+    # since local dev in Phase 1, now running in CI instead of on a
+    # developer's machine.
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: ride_sharing_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 5
+
+      redis:
+        image: redis:7-alpine
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 5
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - run: npm ci
+
+      # The committed .env.test targets a developer's local Postgres
+      # (trust-authenticated under their own OS user, no password) —
+      # that user doesn't exist on this runner. CI needs its own values
+      # matching the service containers' actual credentials above; this
+      # step's file only ever exists on the ephemeral runner, never
+      # committed back, so it doesn't touch what local developers use.
+      - name: Write CI test environment
+        run: |
+          cat > .env.test << 'EOF'
+          NODE_ENV=test
+          PORT=4001
+          DATABASE_URL="postgresql://postgres:postgres@localhost:5432/ride_sharing_test?schema=public"
+          REDIS_URL="redis://localhost:6379/1"
+          JWT_ACCESS_SECRET="ci-only-access-secret-not-for-real-use-000000"
+          JWT_ACCESS_EXPIRES_IN="15m"
+          JWT_REFRESH_SECRET="ci-only-refresh-secret-not-for-real-use-000000"
+          JWT_REFRESH_EXPIRES_IN="30d"
+          CORS_ORIGIN="*"
+          LOG_LEVEL="error"
+          BCRYPT_SALT_ROUNDS=10
+          CLIENT_URL="http://localhost:3000"
+          EOF
+
+      - name: Apply migrations
+        run: npx prisma migrate deploy
+
+      - name: Run test suite
+        run: npm test
+
+  docker-build:
+    runs-on: ubuntu-latest
+    needs: test
+    steps:
+      - uses: actions/checkout@v4
+
+      # Builds, doesn't push — this catches a broken Dockerfile (a stage
+      # that fails, a file the runtime stage expects but the builder never
+      # produced) on every PR, before it becomes a deploy-time surprise.
+      - name: Build image
+        run: docker build -t ride-sharing-backend:ci .

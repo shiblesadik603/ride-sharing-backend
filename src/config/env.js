@@ -74,6 +74,24 @@ const envSchema = z.object({
   // CASH ride payments work fully without Stripe.
   STRIPE_SECRET_KEY: z.string().optional(),
   STRIPE_WEBHOOK_SECRET: z.string().optional(),
+
+  // Lets background job workers (email, cleanup, reports) run as a
+  // separate process (src/worker.js, see docker-compose.yml's `worker`
+  // service) instead of in-process with the HTTP server — set to "false"
+  // on the API service in that topology so jobs aren't double-processed
+  // by both. Default "true" keeps `npm run dev` and single-service
+  // deployments (Railway/Render) simple, exactly as before this existed.
+  // z.coerce.boolean() is deliberately not used here — Boolean("false")
+  // is true in JavaScript, the same trap fixed in common.validator.js's
+  // booleanQueryParam after it broke a query-string filter in Phase 9.
+  // `.default()` must come BEFORE `.transform()` — calling it after would
+  // apply the string "true" as the default post-transform, on a schema
+  // whose type is already boolean at that point (caught by testing this
+  // exact line before it shipped, not assumed correct).
+  ENABLE_JOBS: z
+    .enum(["true", "false"])
+    .default("true")
+    .transform((v) => v === "true"),
 });
 
 const parsed = envSchema.safeParse(process.env);

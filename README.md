@@ -4,7 +4,7 @@ A production-grade, Uber-like ride sharing backend built incrementally, phase by
 
 ## Stack
 
-Node.js (ESM) · Express 5 · PostgreSQL · Prisma · Redis · BullMQ · Socket.IO · JWT · Zod · Jest
+Node.js (ESM) · Express 5 · PostgreSQL · Prisma · Redis · BullMQ · Socket.IO · JWT · Zod · Jest · Docker · GitHub Actions
 
 ## Architecture
 
@@ -327,6 +327,45 @@ One genuine library limitation surfaced immediately: OpenAPI's `pattern` field c
 
 Verified live in a real browser, not just "the JSON generates without throwing": Swagger UI renders with zero console errors and zero CSP violations against this project's `helmet()` defaults — swagger-ui-express v5 ships its initialization as an external same-origin script rather than an inline one specifically to avoid needing `unsafe-inline`, which is what makes it CSP-compatible out of the box here.
 
+## DevOps
+
+**This phase closes a limitation flagged back in Phase 9.** Job workers ran in-process with the HTTP server the whole time — noted then as fine at this project's scale but not how a real deployment handling meaningful job volume would want it. `src/worker.js` is a standalone entry point for the exact same job processors, and it required *zero* changes to the jobs themselves: every processor in `jobs/processors/` already only depended on `queueConnection` and the database, never on Express. `docker-compose.yml` runs it as its own service, alongside an `app` service with `ENABLE_JOBS=false` so the same email/cleanup/report jobs aren't double-processed by both.
+
+**This split is proven, not just plausible.** `app` and `worker` were run as two genuinely separate Node processes (`ENABLE_JOBS=false node src/server.js` alongside `node src/worker.js`), a registration request hit `app`, and the resulting verification email was processed — visibly, in that process's own log — entirely by `worker`, a different OS process that only learned about the job via Redis. That's the real cross-process behavior Docker Compose packages; running it directly first is what made shipping it with confidence possible.
+
+### Docker
+
+```bash
+docker compose up --build
+```
+
+Builds a multi-stage image (`Dockerfile`) — a `builder` stage that installs dependencies and runs `prisma generate`, and a `runtime` stage that copies only what's needed to run, as a non-root user. `docker-entrypoint.sh` runs `prisma migrate deploy` before starting the app or worker; safe to run from both, since Prisma's own migrations table acts as a lock, though a real multi-replica deployment behind a load balancer is better served by wiring migrations as a distinct release-command step (Railway and Render both support one) so they run exactly once per deploy, not once per replica — noted in the entrypoint script's own comment rather than built, since this project's Compose topology is single-replica.
+
+Two gotchas fixed before they could bite, not discovered in production:
+- **`bcrypt` on Alpine.** Its native binding ships prebuilt binaries for glibc, not Alpine's musl libc — a bare Alpine image falls back to compiling from source and fails outright without build tools. `python3 make g++` are installed in the builder stage specifically for this.
+- **The healthcheck.** Busybox's `wget` (Alpine's default) behaves subtly differently across versions, and neither `wget` nor `curl` is guaranteed present on every base image. The `HEALTHCHECK` uses Node's own `fetch` instead — zero extra dependency, since Node is the one thing the image is guaranteed to have. Verified by running the exact command locally against the real server before trusting it in the image.
+
+`prisma` moved from `devDependencies` to `dependencies` this phase — it's the CLI `migrate deploy` needs at container *runtime*, not just at build time, so `npm ci --omit=dev` needs to still install it.
+
+### Docker Compose
+
+Four services: `postgres`, `redis`, `app` (HTTP API, jobs disabled), `worker` (jobs only, no HTTP). `DATABASE_URL`/`REDIS_URL` are overridden in `docker-compose.yml` to point at the Postgres/Redis *service names* — inside Docker's network, `localhost` refers to the container itself, not a sibling service, a mistake that fails silently as "connection refused" rather than a clear error. Everything else (JWT secrets, Stripe/SMTP/Maps keys) comes from `.env` via `env_file`.
+
+### GitHub Actions CI (`.github/workflows/ci.yml`)
+
+Runs on every push/PR to `main`: real Postgres and Redis service containers (not mocked — the same philosophy as local dev and Phase 11's test suite), `prisma migrate deploy`, then the actual `npm test` suite. A second job builds the Docker image (not pushes it) to catch a broken `Dockerfile` — a stage that fails, a file the runtime stage expects but the builder never produced — on every PR, before it becomes a deploy-time surprise.
+
+One real wrinkle solved here: the committed `.env.test` targets a developer's local Postgres (trust-authenticated under their own OS user, no password) — that user doesn't exist on a CI runner. Rather than weaken the `override: true` fix from Phase 11 (which specifically exists to make `.env.test`'s values win over stray `process.env` state), the CI workflow writes its *own* ephemeral `.env.test` matching the actual service-container credentials, as a step that only ever touches the runner's checkout — never committed back, never affecting what local developers use.
+
+### Deploying (Railway / Render / AWS EC2)
+
+The Dockerfile and the `ENABLE_JOBS` env var are what make this portable across all three without code changes:
+
+- **Railway / Render** — point either at this repo; both build from the `Dockerfile` automatically. Simplest: one service, `ENABLE_JOBS` unset (defaults `true`), jobs run in-process — no `worker` service needed. Set the required env vars from `.env.example` (`DATABASE_URL`/`REDIS_URL` from the platform's own managed Postgres/Redis add-ons, JWT secrets generated fresh — never reuse this repo's dev/test ones). Both platforms support a release-command/pre-deploy hook — point it at `npx prisma migrate deploy` instead of relying on `docker-entrypoint.sh` once running more than one replica.
+- **AWS EC2** — install Docker, `git clone`, `docker compose up -d --build` with a production `.env`. For anything beyond a single instance, replace the Compose-managed Postgres/Redis with RDS/ElastiCache and point `DATABASE_URL`/`REDIS_URL` at those instead of the bundled containers, and put the `app` service behind an ALB using the same `/health` endpoint Docker's own `HEALTHCHECK` already checks.
+
+None of these have been deployed to from this environment — no cloud credentials are available here — so this is accurate guidance based on what the Dockerfile and Compose file actually do, not a claim of having exercised the deploy path end-to-end on any of the three.
+
 ## Known Limitations
 
 Deliberate, stated simplifications accumulated across phases — not gaps found by accident:
@@ -335,7 +374,7 @@ Deliberate, stated simplifications accumulated across phases — not gaps found 
 - **No driver payout system.** `Driver.totalEarnings` accrues on every completed ride, but there's no Stripe Connect integration to actually pay a driver out to a bank account — that's KYC + Connect account onboarding, a substantially larger feature than this phase's scope.
 - **No heartbeat/staleness detection for "online" drivers.** A driver who force-quits without calling `/drivers/me/offline` stays in `geo:drivers:online` indefinitely. Now that Background Jobs exists, this is straightforward to add (a repeatable job sweeping stale `lastLocationAt` timestamps) — it just wasn't what got built this phase; the two jobs implemented (token cleanup, daily report) were chosen to match the spec's explicit examples.
 - **Coupon usage limits are check-then-write, not atomic.** Unlike wallet debits, a coupon's `usageLimit` could be oversold by a few redemptions under heavy concurrent use — an accepted tradeoff since the failure mode is marketing overspend, not lost funds (see the comment in `coupon.service.js`).
-- **Job workers run in the same process as the HTTP server.** Appropriate at this project's scale; a production deployment handling meaningful job volume would typically run `jobs/index.js`'s workers as a separate process so a burst of email jobs can't compete with API requests for event-loop time. Nothing about the processors themselves would need to change — see the comment in `jobs/index.js`.
+- ~~**Job workers run in the same process as the HTTP server.**~~ **Resolved in the DevOps phase.** `src/worker.js` runs the same processors as a separate process, and `docker-compose.yml` demonstrates it as the default topology (`app` with `ENABLE_JOBS=false` alongside a dedicated `worker` service) — proven, not just built, by running both as genuinely separate Node processes and watching a job enqueued by one get processed entirely by the other. A single-service deployment (Railway/Render, or plain `npm run dev`) can still just leave `ENABLE_JOBS` unset and run jobs in-process — both are supported, not a breaking change.
 
 ## Phases
 
@@ -353,4 +392,6 @@ This backend is being built incrementally. Each phase is scoped, explained, and 
 - [x] **Phase 10** — Admin dashboard & analytics
 - [x] **Phase 11** — Testing
 - [x] **Phase 12** — API documentation (Swagger)
-- [ ] Docker & CI/CD
+- [x] **Phase 13** — Docker & CI/CD
+
+This backend is now feature-complete against its original 13-phase plan.
