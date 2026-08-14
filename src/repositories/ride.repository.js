@@ -62,6 +62,48 @@ export function updateStatus(rideId, data) {
   return prisma.ride.update({ where: { id: rideId }, data, include: DETAIL_INCLUDE });
 }
 
+/**
+ * Same conditional-UPDATE pattern as tryAssignDriver: the stale-ride expiry
+ * job reads a ride's status, then (asynchronously, in a separate job run)
+ * writes CANCELLED to it — a passenger or driver could legitimately
+ * transition the ride in the gap between those two steps. Gating the write
+ * on `status: expectedStatus` still holding means the job's cancel and a
+ * user's concurrent accept/cancel/arrive can never both apply; whichever
+ * lands first in Postgres wins and the other sees count 0.
+ */
+export function tryUpdateStatusIfCurrently(rideId, expectedStatus, data) {
+  return prisma.ride.updateMany({ where: { id: rideId, status: expectedStatus }, data });
+}
+
+/** Rides nobody has accepted after too long — the "no drivers found /
+ * every nearby driver rejected" dead end with no other exit. */
+export function findStaleRequested(olderThan) {
+  return prisma.ride.findMany({
+    where: { status: "REQUESTED", requestedAt: { lt: olderThan } },
+    include: DETAIL_INCLUDE,
+  });
+}
+
+/** Rides a driver accepted but never marked arrived — covers the driver
+ * going dark (crash, dead battery, disconnected) after committing. */
+export function findStaleAccepted(olderThan) {
+  return prisma.ride.findMany({
+    where: { status: "ACCEPTED", acceptedAt: { lt: olderThan } },
+    include: DETAIL_INCLUDE,
+  });
+}
+
+/** Rides where the driver arrived but the OTP handoff never happened —
+ * the OTP itself expires (see OTP_VALIDITY_MINUTES_AFTER_ARRIVAL) and
+ * blocks startRide, but without this the ride would otherwise sit ARRIVED
+ * forever since nothing else moves it out of that state. */
+export function findStaleArrived(olderThan) {
+  return prisma.ride.findMany({
+    where: { status: "ARRIVED", arrivedAt: { lt: olderThan } },
+    include: DETAIL_INCLUDE,
+  });
+}
+
 export function listByPassenger({ passengerId, page, limit, status }) {
   return prisma.ride.findMany({
     where: { passengerId, ...(status && { status }) },

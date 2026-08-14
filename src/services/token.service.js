@@ -4,6 +4,7 @@ import { env } from "../config/env.js";
 import { ApiError } from "../utils/ApiError.js";
 import { hashToken, generateRandomToken } from "../utils/token.util.js";
 import * as tokenRepository from "../repositories/token.repository.js";
+import { redis } from "../config/redis.js";
 
 // ---------------------------------------------------------------------------
 // Access tokens — stateless JWTs, verified by signature alone, never touch
@@ -18,9 +19,55 @@ export function signAccessToken(user) {
 
 export function verifyAccessToken(token) {
   try {
-    return jwt.verify(token, env.JWT_ACCESS_SECRET);
+    // A short clock-skew allowance for multi-server deployments: without
+    // it, a token issued by a server whose clock runs even a few seconds
+    // ahead of the verifying server's can be rejected as "not yet valid"
+    // (or expire a few seconds early), for reasons that have nothing to
+    // do with the token actually being invalid.
+    return jwt.verify(token, env.JWT_ACCESS_SECRET, { clockTolerance: 10 });
   } catch {
     throw ApiError.unauthorized("Invalid or expired access token");
+  }
+}
+
+const accessRevocationKey = (userId) => `auth:accessRevoked:${userId}`;
+
+/**
+ * Access tokens are stateless — verified by signature alone, no DB/Redis
+ * hit on the normal request path, by design (see the comment on
+ * signAccessToken). That means there's normally no way to invalidate one
+ * before it naturally expires, which is fine for a leaked token (15
+ * minutes of exposure) but not fine for "this account was just banned" —
+ * without this, a banned/suspended user's existing access token, and a
+ * stolen one that survives a password reset, both keep working for up to
+ * JWT_ACCESS_EXPIRES_IN after the security event that should have killed
+ * them.
+ *
+ * This adds exactly one narrow, fast check (a Redis key lookup, not a DB
+ * call) for that specific case, called only from the handful of places
+ * that represent "kill this user's access right now": ban, driver
+ * suspend/reject, password change/reset. TTL matches the access token's
+ * own lifetime — once every token that could have been issued before this
+ * call has expired anyway, the marker is pointless and Redis reclaims it
+ * on its own.
+ */
+export async function revokeAllUserAccessTokens(userId) {
+  const ttlSeconds = Math.ceil(ms(env.JWT_ACCESS_EXPIRES_IN) / 1000);
+  await redis.set(accessRevocationKey(userId), "1", "EX", ttlSeconds);
+}
+
+/**
+ * Fails open (treats the user as not revoked) if Redis is unreachable,
+ * rather than making every authenticated request hard-depend on Redis
+ * being up. The JWT signature remains the real authentication; this is
+ * defense-in-depth for a narrow post-security-event window, not the
+ * primary gate — an outage here shouldn't take down the whole API.
+ */
+export async function isUserAccessRevoked(userId) {
+  try {
+    return (await redis.exists(accessRevocationKey(userId))) === 1;
+  } catch {
+    return false;
   }
 }
 

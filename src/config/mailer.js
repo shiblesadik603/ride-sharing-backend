@@ -14,5 +14,17 @@ export const transporter = hasSmtpConfig
       port: env.SMTP_PORT,
       secure: env.SMTP_PORT === 465,
       auth: { user: env.SMTP_USER, pass: env.SMTP_PASS },
+      // No timeout previously meant an unresponsive SMTP server could
+      // hang sendMail() indefinitely — which, since this only ever runs
+      // inside the email job processor, would hold that job's BullMQ
+      // lock (and a worker slot) hostage for as long as the connection
+      // stayed open. These three cover connection setup, the initial
+      // SMTP greeting, and overall socket inactivity respectively — worst
+      // case, all three stack to under 30s, which is what
+      // jobs/processors/email.processor.js's own lockDuration is sized
+      // against.
+      connectionTimeout: 10_000,
+      greetingTimeout: 10_000,
+      socketTimeout: 10_000,
     })
   : null;

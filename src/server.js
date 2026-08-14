@@ -58,8 +58,39 @@ async function shutdown(signal) {
 process.on("SIGTERM", () => shutdown("SIGTERM"));
 process.on("SIGINT", () => shutdown("SIGINT"));
 
+/**
+ * ioredis rejects in-flight command promises when a connection drops and
+ * its retry budget (`maxRetriesPerRequest`) is exhausted — that rejection
+ * originates deep inside ioredis's own reconnect bookkeeping, on whichever
+ * specific command happened to be in flight at the time, not from any
+ * call site this codebase controls or could wrap in try/catch. Every
+ * *service-level* Redis call this app makes has already been made
+ * resilient to Redis being down (geo.service.js's withRedisFallback,
+ * auth.service.js's login-lockout guards, the error listeners in
+ * config/redis.js and config/queue.js) — this is the leftover noise from
+ * ioredis's internals during exactly that same scenario, not a sign
+ * anything is actually broken. Confirmed live: stopping Redis during
+ * testing produced exactly this class of rejection and nothing else,
+ * and the app's own Redis-touching code kept degrading correctly around it.
+ *
+ * A genuinely unknown/unexpected unhandled rejection — the entire reason
+ * this handler exists — still crashes the process. This is a narrow,
+ * named exception for one specific, already-understood, already-handled
+ * failure mode, not a general "ignore unhandled rejections" policy.
+ */
+const KNOWN_TRANSIENT_REDIS_ERRORS = new Set([
+  "MaxRetriesPerRequestError",
+  "ConnectionError",
+  "ClusterAllFailedError",
+]);
+
 process.on("unhandledRejection", (reason) => {
   logger.error("Unhandled promise rejection", { reason });
+
+  if (reason instanceof Error && KNOWN_TRANSIENT_REDIS_ERRORS.has(reason.name)) {
+    return;
+  }
+
   throw reason instanceof Error ? reason : new Error(String(reason));
 });
 

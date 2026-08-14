@@ -48,6 +48,16 @@ Design lives in [prisma/schema.prisma](prisma/schema.prisma) — 22 tables, full
 - **IDs are `cuid()`, not auto-increment or `uuid()`.** Non-guessable (safe to expose in URLs, unlike sequential IDs) and more index-friendly than random UUIDv4 (which fragments B-tree indexes at scale due to random insert order).
 - **`RideStatusLog` and `AuditLog` are append-only audit trails**, separate from the mutable `Ride`/`User` rows. Reconstructing "what happened and when" from `updatedAt` alone doesn't survive a support dispute or a fraud investigation.
 
+### Migration rollback
+
+Prisma doesn't generate down-migrations — `prisma/migrations/*/migration.sql` is forward-only by design (this is Prisma's own model, not a gap specific to this project). Recovering from a bad migration in production means one of:
+
+1. **Revert-forward (preferred).** Write a *new* migration that undoes the change (e.g., the last migration added a column — the fix is a new migration that drops it), then `prisma migrate deploy` as normal. Keeps the migration history linear and honest about what actually happened to the schema over time, rather than rewriting history.
+2. **Restore from backup** (see Backup & Disaster Recovery below) if the bad migration already corrupted or lost data a revert-forward migration can't reconstruct — e.g., a dropped column that held real values.
+3. **`prisma migrate resolve --rolled-back <name>`** only marks a *failed* migration (one that errored mid-apply) as not-applied in Prisma's own tracking table, so a corrected version can be retried — this project used it for real during this hardening pass, twice (`wallet_transaction_idempotency_constraint`'s first attempt failed on pre-existing duplicate data; the corrected migration.sql was re-deployed after resolving). It does **not** undo a migration that already applied successfully — that's option 1.
+
+No automated rollback tooling beyond what's above — for a project at this scale, a documented procedure is proportionate; a full migration-rollback automation system is not.
+
 ## Local Setup
 
 ```bash
@@ -76,6 +86,7 @@ All routes mounted under `/api/v1/auth`:
 | POST | `/google` | — | Verifies a Google ID token, auto-links/creates account |
 | POST | `/refresh` | refresh token (cookie or body) | Rotates the refresh token; reuse of a rotated token revokes all sessions |
 | POST | `/logout` | refresh token (cookie or body) | Revokes that one session |
+| POST | `/logout-all` | Bearer token | Revokes every session on every device (refresh tokens + already-issued access tokens) — added in the production-hardening pass, previously only reachable as a side effect of a password change |
 | POST | `/forgot-password` | — | Always responds the same way, regardless of whether the email exists |
 | POST | `/reset-password` | — | Revokes all existing sessions on success |
 | POST | `/verify-email` | — | Single-use token |
@@ -327,6 +338,25 @@ One genuine library limitation surfaced immediately: OpenAPI's `pattern` field c
 
 Verified live in a real browser, not just "the JSON generates without throwing": Swagger UI renders with zero console errors and zero CSP violations against this project's `helmet()` defaults — swagger-ui-express v5 ships its initialization as an external same-origin script rather than an inline one specifically to avoid needing `unsafe-inline`, which is what makes it CSP-compatible out of the box here.
 
+## Observability
+
+Added in a production-hardening pass, alongside the concurrency/consistency fixes documented in each phase above.
+
+- **`GET /metrics`** — Prometheus-format text exposition (`prom-client`). Node.js process metrics (CPU, memory, event-loop lag, GC — `collectDefaultMetrics()`, essentially free) plus custom metrics mapped straight to this project's own monitoring requirements: `http_request_duration_seconds`/`http_requests_total` (latency, throughput, error rate — labeled by route *pattern*, with id-shaped path segments sanitized to `:id` so per-request cardinality can't leak into a Prometheus label set), `ride_outcomes_total` (ride success rate: completed vs. cancelled vs. system-expired), `payment_outcomes_total` (payment success rate, by method), `drivers_online`/`queue_jobs`/`database_up`/`redis_up`/`socket_connections` (driver availability, queue depth, dependency health). Unauthenticated, same reasoning as `/health` — a Prometheus scraper doesn't carry a bearer token; restrict at the network/ingress level in a real deployment.
+- **Request-id / correlation-id.** Every request gets an id (`X-Request-Id` — reused if the caller already sent one, generated fresh otherwise), threaded through the access log line, the error log line, and error JSON responses. Turns "which log lines belong to this one request" from a timestamp-correlation guess into a single grep.
+- **Structured logging with redaction.** Winston's production format is JSON (log-aggregator-friendly); a format step recursively masks any metadata key matching a sensitive-field pattern (`password`, `token`, `otp`, `secret`, `authorization`, `cardNumber`, `cvv`, ...) before anything reaches a transport — defense-in-depth against a future log call accidentally including one, not a response to any leak actually found (none was, on audit).
+- **`/health` genuinely checks dependencies** (`SELECT 1` against Postgres, `PING` against Redis, both already existed) rather than just "the process is up."
+
+## Failure Recovery
+
+**The most severe bug found in this project, caught only by actually stopping Redis while the server was running — static review had marked "Redis unavailable" as handled before this.** Two of the app's three Redis connections (`redisSubscriber` in `config/redis.js`, `queueConnection` in `config/queue.js`) had no `"error"` event listener at all. Node's `EventEmitter` doesn't log-and-continue when an `"error"` event has zero listeners — it throws, synchronously, which crashes the entire process. A Redis restart didn't degrade Socket.IO's cross-instance broadcasting or BullMQ's job processing; it took down the whole HTTP API, every route, every in-flight request, immediately. Both connections now have handlers (`config/redis.js`, `config/queue.js`).
+
+That fix surfaced a second layer: ioredis also rejects in-flight command promises when a connection drops and its retry budget is exhausted, from inside ioredis's own reconnect internals — not from any call site this codebase controls. `server.js`'s global `unhandledRejection` handler previously treated *every* unhandled rejection as fatal (a defensible fail-fast policy in general — an unknown unhandled rejection means the process is in a state nobody reasoned about). It now recognizes that one specific, already-understood, already-handled failure class (`MaxRetriesPerRequestError` and friends) by name and logs-and-continues instead of crashing; a genuinely unexpected unhandled rejection still crashes the process exactly as before.
+
+With the process itself no longer crashing, the remaining gap was service-level: `geo.service.js`'s Redis calls (driver/ride geo-matching, heartbeat, rejection tracking) and the login-lockout check in `auth.service.js` both used to let a Redis error propagate straight into a 500. Every one of those now degrades to a specific, reasoned fallback value instead — see the comments in `geo.service.js` and `auth.service.js: login()` for why each fallback direction (fail-open vs. fail-closed, empty-result vs. null) is the safe one for that specific call, not just a convenient default.
+
+**Verified against a real outage, not a mock.** `brew services stop redis` while the server was already running and fully warmed up: `/health` correctly reported `503` with `"redis": "down"`; login, ride requests, and every other exercised endpoint kept working; the process stayed up throughout. `brew services start redis` afterward: full recovery, no restart needed. Separately confirmed that a *stopped* Redis at process **startup** doesn't crash the boot sequence either — `initJobs()`'s BullMQ setup call blocks (rather than failing) until Redis becomes reachable, then boot completes normally; noted as an accepted, self-healing (if not maximally fast-failing) characteristic rather than something requiring an explicit startup timeout for this project's scope.
+
 ## DevOps
 
 **This phase closes a limitation flagged back in Phase 9.** Job workers ran in-process with the HTTP server the whole time — noted then as fine at this project's scale but not how a real deployment handling meaningful job volume would want it. `src/worker.js` is a standalone entry point for the exact same job processors, and it required *zero* changes to the jobs themselves: every processor in `jobs/processors/` already only depended on `queueConnection` and the database, never on Express. `docker-compose.yml` runs it as its own service, alongside an `app` service with `ENABLE_JOBS=false` so the same email/cleanup/report jobs aren't double-processed by both.
@@ -366,13 +396,22 @@ The Dockerfile and the `ENABLE_JOBS` env var are what make this portable across 
 
 None of these have been deployed to from this environment — no cloud credentials are available here — so this is accurate guidance based on what the Dockerfile and Compose file actually do, not a claim of having exercised the deploy path end-to-end on any of the three.
 
+### Backup & Disaster Recovery
+
+Before this, the only copy of the data was whatever was in the running Postgres instance — a lost or corrupted volume/managed-instance meant unrecoverable data loss, with no export path at all.
+
+- **`npm run backup`** (`scripts/backup.sh`) — `pg_dump`s `DATABASE_URL` to a timestamped, gzip-compressed file under `BACKUP_DIR` (default `./backups`) and prunes anything older than `BACKUP_RETENTION_DAYS` (default 14). Deliberately a plain shell script, not an in-app scheduled job — a backup has to be able to run even if the app itself is down or broken, so it can't depend on app code executing successfully. Wire it into cron, a platform's scheduled-task feature (Railway/Render cron job, a Kubernetes `CronJob`), or a CI scheduled workflow, pointed at wherever it runs with `DATABASE_URL` and `BACKUP_DIR` set.
+- **`npm run restore -- <file>`** (`scripts/restore.sh`) — restores a `backup.sh` output file into `DATABASE_URL`. Requires typing `yes` to confirm, since it overwrites whatever's currently there with no undo. Run `npx prisma migrate deploy` afterward if the backup predates migrations applied since it was taken.
+- **Recommended cadence**: daily automated backups, 14–30 day retention depending on compliance needs, plus a periodic *restore drill* — actually running `restore.sh` against a scratch database on a schedule, not just trusting that backups exist. An untested backup is a hypothesis, not a recovery plan.
+- **Managed-Postgres alternative**: RDS, Cloud SQL, Railway/Render's managed Postgres, etc. all offer automated point-in-time-recovery snapshots as a platform feature — if deploying to one of those, prefer its native backup feature over this script for the primary safety net, and treat `backup.sh` as a portable, platform-independent supplement (e.g. an off-platform copy, or for local/self-hosted Postgres where no such feature exists).
+
 ## Known Limitations
 
 Deliberate, stated simplifications accumulated across phases — not gaps found by accident:
 
 - **`actualFare` always equals `estimatedFare`.** Recomputing a fare from a real GPS trail (vs. the Haversine/Directions estimate taken at request time) needs the live location history the Real-Time phase streams but doesn't persist. Flagged since Phase 5, still true after Payments.
 - **No driver payout system.** `Driver.totalEarnings` accrues on every completed ride, but there's no Stripe Connect integration to actually pay a driver out to a bank account — that's KYC + Connect account onboarding, a substantially larger feature than this phase's scope.
-- **No heartbeat/staleness detection for "online" drivers.** A driver who force-quits without calling `/drivers/me/offline` stays in `geo:drivers:online` indefinitely. Now that Background Jobs exists, this is straightforward to add (a repeatable job sweeping stale `lastLocationAt` timestamps) — it just wasn't what got built this phase; the two jobs implemented (token cleanup, daily report) were chosen to match the spec's explicit examples.
+- ~~**No heartbeat/staleness detection for "online" drivers.**~~ **Resolved in the production-hardening pass.** A short-TTL Redis heartbeat (`geo.service.js`), refreshed on every location ping and on going online, is swept every minute by `expire-stale-driver-heartbeats` (`driver.service.js: expireStaleHeartbeats`) — a driver who force-quits without calling `/drivers/me/offline` now falls out of `geo:drivers:online` and `isOnline` within roughly 90–150 seconds instead of staying discoverable forever.
 - **Coupon usage limits are check-then-write, not atomic.** Unlike wallet debits, a coupon's `usageLimit` could be oversold by a few redemptions under heavy concurrent use — an accepted tradeoff since the failure mode is marketing overspend, not lost funds (see the comment in `coupon.service.js`).
 - ~~**Job workers run in the same process as the HTTP server.**~~ **Resolved in the DevOps phase.** `src/worker.js` runs the same processors as a separate process, and `docker-compose.yml` demonstrates it as the default topology (`app` with `ENABLE_JOBS=false` alongside a dedicated `worker` service) — proven, not just built, by running both as genuinely separate Node processes and watching a job enqueued by one get processed entirely by the other. A single-service deployment (Railway/Render, or plain `npm run dev`) can still just leave `ENABLE_JOBS` unset and run jobs in-process — both are supported, not a breaking change.
 

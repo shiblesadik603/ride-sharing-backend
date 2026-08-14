@@ -1,6 +1,7 @@
 import { Router } from "express";
 import * as authController from "../controllers/auth.controller.js";
 import { validate } from "../middlewares/validate.middleware.js";
+import { authenticate } from "../middlewares/auth.middleware.js";
 import { loginLimiter, passwordResetLimiter } from "../middlewares/rateLimit.middleware.js";
 import {
   registerSchema,
@@ -21,6 +22,7 @@ router.post("/google", loginLimiter, validate(googleAuthSchema), authController.
 
 router.post("/refresh", validate(refreshTokenSchema), authController.refresh);
 router.post("/logout", authController.logout);
+router.post("/logout-all", authenticate, authController.logoutAll);
 
 router.post(
   "/forgot-password",

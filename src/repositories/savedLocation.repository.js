@@ -4,10 +4,13 @@ export function create(passengerId, data) {
   return prisma.savedLocation.create({ data: { ...data, passengerId } });
 }
 
+/** Same reasoning as favoriteDriver.repository.js: a defensive cap, not
+ * real pagination — a naturally small, self-limited collection. */
 export function listByPassenger(passengerId) {
   return prisma.savedLocation.findMany({
     where: { passengerId },
     orderBy: { createdAt: "desc" },
+    take: 200,
   });
 }
 

@@ -20,6 +20,18 @@ services:
 
   redis:
     image: redis:7-alpine
+    # Explicit, not relying on the image's default: this Redis instance
+    # backs BullMQ's job queues, not just disposable geo/rate-limit data —
+    # losing a queued job (a verification email, a scheduled report) to
+    # silent eviction under memory pressure would be a real correctness
+    # bug, not a cache miss. `noeviction` makes Redis reject writes with a
+    # loud OOM error instead of quietly dropping data once `maxmemory` is
+    # reached — worse availability in that moment, but a failure you can
+    # alert on beats silent data loss. 256mb is a generous ceiling for
+    # this project's data (geo sets, rate-limit counters, queue payloads
+    # measured in kilobytes each); raise it if BullMQ queues are ever
+    # expected to hold a large backlog.
+    command: ["redis-server", "--maxmemory", "256mb", "--maxmemory-policy", "noeviction"]
     ports:
       - "6379:6379"
     volumes:

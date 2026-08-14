@@ -1,13 +1,15 @@
 import { ApiError } from "../utils/ApiError.js";
-import { verifyAccessToken } from "../services/token.service.js";
+import { verifyAccessToken, isUserAccessRevoked } from "../services/token.service.js";
 
 /**
- * Populates req.user = { id, role } from a Bearer access token. Only the
- * JWT signature is checked here — no DB hit, which is the entire point of
- * using a stateless token for the high-frequency "is this request
- * authenticated" check on every protected route.
+ * Populates req.user = { id, role } from a Bearer access token. The JWT
+ * signature check is still the primary, no-DB-hit authentication — the
+ * revocation check added below is a single fast Redis lookup (not a DB
+ * call), and only ever returns true in the narrow window right after a
+ * ban/suspension/password reset (see token.service.js), so it doesn't
+ * undermine the reason access tokens are stateless in the first place.
  */
-export function authenticate(req, res, next) {
+export async function authenticate(req, res, next) {
   const header = req.headers.authorization;
 
   if (!header?.startsWith("Bearer ")) {
@@ -15,6 +17,11 @@ export function authenticate(req, res, next) {
   }
 
   const payload = verifyAccessToken(header.slice("Bearer ".length));
+
+  if (await isUserAccessRevoked(payload.sub)) {
+    throw ApiError.unauthorized("Your session has been revoked. Please log in again.");
+  }
+
   req.user = { id: payload.sub, role: payload.role };
   next();
 }

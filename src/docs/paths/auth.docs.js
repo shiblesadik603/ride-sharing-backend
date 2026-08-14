@@ -1,5 +1,5 @@
 import { z } from "zod";
-import { registry, jsonBody, successResponse, standardErrors } from "../registry.js";
+import { registry, jsonBody, successResponse, standardErrors, bearerAuth } from "../registry.js";
 import {
   registerSchema,
   loginSchema,
@@ -103,6 +103,17 @@ registry.registerPath({
   tags: ["Auth"],
   summary: "Revoke the current session's refresh token",
   responses: { 200: successResponse(z.null()) },
+});
+
+registry.registerPath({
+  method: "post",
+  path: "/api/v1/auth/logout-all",
+  tags: ["Auth"],
+  security: bearerAuth,
+  summary: "Revoke every session on every device for the current account",
+  description:
+    "Revokes all refresh tokens and immediately invalidates already-issued access tokens — the same mechanism a ban or password reset uses internally, exposed here for a user who suspects their own account is compromised or lost a device.",
+  responses: { 200: successResponse(z.null()), ...standardErrors(401) },
 });
 
 registry.registerPath({

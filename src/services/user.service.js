@@ -5,6 +5,7 @@ import { sanitizeUser } from "../utils/sanitizeUser.js";
 import * as userRepository from "../repositories/user.repository.js";
 import * as driverRepository from "../repositories/driver.repository.js";
 import * as tokenRepository from "../repositories/token.repository.js";
+import { revokeAllUserAccessTokens } from "./token.service.js";
 
 export async function getProfile(userId) {
   const user = await userRepository.findByIdWithProfile(userId);
@@ -34,8 +35,12 @@ export async function changePassword(userId, { currentPassword, newPassword }) {
   await userRepository.updatePasswordHash(userId, passwordHash);
 
   // Same reasoning as a forgot-password reset: a password change should
-  // invalidate every other session in case this one is the attacker's.
+  // invalidate every other session in case this one is the attacker's —
+  // refresh tokens AND the currently-issued access token both, otherwise
+  // the access token this same request was authenticated with keeps
+  // working for its full remaining TTL regardless of the change just made.
   await tokenRepository.revokeAllUserRefreshTokens(userId);
+  await revokeAllUserAccessTokens(userId);
 }
 
 /**

@@ -16,8 +16,8 @@ export function findByStripePaymentIntentId(stripePaymentIntentId) {
   return prisma.payment.findUnique({ where: { stripePaymentIntentId } });
 }
 
-export function updateStatus(id, status, extra = {}) {
-  return prisma.payment.update({ where: { id }, data: { status, ...extra } });
+export function updateStatus(id, status, extra = {}, client = prisma) {
+  return client.payment.update({ where: { id }, data: { status, ...extra } });
 }
 
 export function list({ page, limit, status }) {

@@ -1,7 +1,7 @@
 import { prisma } from "../config/database.js";
 
-export function create(data) {
-  return prisma.refund.create({ data });
+export function create(data, client = prisma) {
+  return client.refund.create({ data });
 }
 
 export async function sumCompletedByPayment(paymentId) {

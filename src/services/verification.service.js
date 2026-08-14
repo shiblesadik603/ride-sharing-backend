@@ -4,7 +4,9 @@ import * as vehicleRepository from "../repositories/vehicle.repository.js";
 import * as vehicleDocumentRepository from "../repositories/vehicleDocument.repository.js";
 import * as auditLogRepository from "../repositories/auditLog.repository.js";
 import * as userRepository from "../repositories/user.repository.js";
+import * as tokenRepository from "../repositories/token.repository.js";
 import * as notificationService from "./notification.service.js";
+import { revokeAllUserAccessTokens } from "./token.service.js";
 
 const DECISION_COPY = {
   APPROVED: "Your driver application has been approved — you can now go online and accept rides.",
@@ -35,6 +37,16 @@ export async function reviewDriver(driverId, verificationStatus, reason, actor) 
   }
 
   const updated = await driverRepository.setVerificationStatus(driverId, verificationStatus);
+
+  if (verificationStatus === "SUSPENDED" || verificationStatus === "REJECTED") {
+    // Unlike a plain user ban, this was previously a silent gap: a
+    // suspended/rejected driver kept every refresh token valid and could
+    // keep minting fresh access tokens indefinitely. Revoking both refresh
+    // and already-issued access tokens closes that window the same way
+    // user deactivation does.
+    await tokenRepository.revokeAllUserRefreshTokens(driver.userId);
+    await revokeAllUserAccessTokens(driver.userId);
+  }
 
   await auditLogRepository.record({
     actorId: actor.id,

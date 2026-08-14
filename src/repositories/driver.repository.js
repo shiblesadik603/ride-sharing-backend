@@ -65,6 +65,13 @@ export function setOnlineStatus(id, { isOnline, isAvailable }) {
   return prisma.driver.update({ where: { id }, data: { isOnline, isAvailable } });
 }
 
+/** Lean id-only projection for the heartbeat sweep — the set of drivers
+ * Postgres currently believes are online, checked against Redis to find
+ * whoever's heartbeat has actually expired. */
+export function listOnlineIds() {
+  return prisma.driver.findMany({ where: { isOnline: true }, select: { id: true } });
+}
+
 export function setAvailable(id, isAvailable) {
   return prisma.driver.update({ where: { id }, data: { isAvailable } });
 }

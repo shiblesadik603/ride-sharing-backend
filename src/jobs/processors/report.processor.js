@@ -16,7 +16,11 @@ export function createReportWorker() {
       logger.info("Daily summary report generated and emailed to admins", summary);
       return summary;
     },
-    { connection: queueConnection }
+    // Report generation is DB aggregation plus enqueueing an email job
+    // (not sending one directly), so no SMTP-hang risk here — 30s is
+    // ample; explicit for the same "documented, not accidental" reason as
+    // the other two workers.
+    { connection: queueConnection, lockDuration: 30_000 }
   );
 
   worker.on("failed", (job, err) => {

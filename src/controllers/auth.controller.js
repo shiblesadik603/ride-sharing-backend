@@ -52,6 +52,12 @@ export async function logout(req, res) {
   res.status(200).json(new ApiResponse(200, null, "Logged out"));
 }
 
+export async function logoutAll(req, res) {
+  await authService.logoutAllDevices(req.user.id);
+  res.clearCookie("refreshToken", refreshTokenCookieOptions);
+  res.status(200).json(new ApiResponse(200, null, "Logged out on all devices"));
+}
+
 export async function forgotPassword(req, res) {
   await authService.forgotPassword(req.body);
   res

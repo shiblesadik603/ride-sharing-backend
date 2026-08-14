@@ -17,6 +17,16 @@ export async function scheduleRepeatableJobs() {
     { pattern: "0 3 * * *" }, // daily 3am
     { name: "expired-tokens" }
   );
+  await maintenanceQueue.upsertJobScheduler(
+    "expire-stale-rides",
+    { every: 2 * 60 * 1000 }, // every 2 minutes — this one is time-sensitive, unlike the daily jobs
+    { name: "expire-stale-rides" }
+  );
+  await maintenanceQueue.upsertJobScheduler(
+    "expire-stale-driver-heartbeats",
+    { every: 60 * 1000 }, // every minute — heartbeat TTL is 90s, so this keeps the gap small
+    { name: "expire-stale-driver-heartbeats" }
+  );
   await reportQueue.upsertJobScheduler(
     "daily-ops-summary",
     { pattern: "0 6 * * *" }, // daily 6am

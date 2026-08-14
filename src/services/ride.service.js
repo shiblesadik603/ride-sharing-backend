@@ -11,11 +11,27 @@ import * as vehicleRepository from "../repositories/vehicle.repository.js";
 import * as geoService from "./geo.service.js";
 import * as mapsService from "./maps.service.js";
 import { emitToUser } from "../sockets/socket.emitter.js";
+import { rideOutcomesTotal } from "../config/metrics.js";
 
 const DEFAULT_SEARCH_RADIUS_KM = 5;
 const CANCELLABLE_STATUSES = ["REQUESTED", "ACCEPTED", "ARRIVED"];
 const MAX_OTP_ATTEMPTS = 5;
 const OTP_ATTEMPT_WINDOW_SECONDS = 15 * 60;
+// Measured from arrivedAt, not ride creation: the OTP only matters once the
+// driver is physically at pickup waiting for it, and matching itself can
+// legitimately take a while before that point. An OTP with no expiry at
+// all stays valid (and guessable within the attempt cap) indefinitely.
+const OTP_VALIDITY_MINUTES_AFTER_ARRIVAL = 10;
+
+// A REQUESTED ride with no accept for this long has exhausted matching —
+// every nearby driver either rejected it or none were ever found, and
+// without this the passenger's only way out is noticing and cancelling
+// manually. An ACCEPTED ride that never reaches ARRIVED for this long means
+// the driver went dark (crash, dead battery, disconnected) after
+// committing — same dead end, different point in the flow.
+const REQUESTED_TIMEOUT_MINUTES = 5;
+const ACCEPTED_TIMEOUT_MINUTES = 15;
+const ARRIVED_TIMEOUT_MINUTES = 15;
 
 function paginationMeta(page, limit, total) {
   return { page, limit, total, totalPages: Math.ceil(total / limit) };
@@ -289,6 +305,13 @@ export async function markArrived(userId, rideId) {
 export async function startRide(userId, rideId, otpCode) {
   const { ride } = await getAssignedRideInStatus(userId, rideId, "ARRIVED");
 
+  const otpAgeMinutes = (Date.now() - new Date(ride.arrivedAt).getTime()) / 60000;
+  if (otpAgeMinutes > OTP_VALIDITY_MINUTES_AFTER_ARRIVAL) {
+    throw ApiError.badRequest(
+      "This OTP has expired. Ask the passenger to cancel and request a new ride."
+    );
+  }
+
   const attemptsKey = `ride:${rideId}:otpAttempts`;
   const attempts = await redis.incr(attemptsKey);
   if (attempts === 1) await redis.expire(attemptsKey, OTP_ATTEMPT_WINDOW_SECONDS);
@@ -334,6 +357,7 @@ export async function completeRide(userId, rideId) {
   ]);
 
   await rideStatusLogRepository.record(ride.id, "COMPLETED");
+  rideOutcomesTotal.inc({ outcome: "completed" });
   emitToUser(updatedRide.passenger.userId, "ride:completed", sanitizeRide(updatedRide, "PASSENGER"));
   return sanitizeRide(updatedRide, "DRIVER");
 }
@@ -351,18 +375,26 @@ export async function cancelRide(userId, rideId, reason) {
     throw ApiError.conflict(`A ride in ${ride.status} status cannot be cancelled`);
   }
 
-  const updated = await rideRepository.updateStatus(ride.id, {
-    status: "CANCELLED",
-    cancelledAt: new Date(),
-    cancelledBy,
-    cancellationReason: reason,
-  });
+  // Status flip and freeing up the driver must land together — a crash
+  // between the two would otherwise leave a driver permanently stuck
+  // `isAvailable: false` with no ride to ever complete and re-free them.
+  const [updated] = await prisma.$transaction([
+    rideRepository.updateStatus(ride.id, {
+      status: "CANCELLED",
+      cancelledAt: new Date(),
+      cancelledBy,
+      cancellationReason: reason,
+    }),
+    ...(ride.driverId ? [driverRepository.setAvailable(ride.driverId, true)] : []),
+  ]);
 
-  if (ride.driverId) {
-    await driverRepository.setAvailable(ride.driverId, true);
-  }
+  // Redis cleanup is best-effort outside the transaction — a stale pending-
+  // ride entry surviving a crash here is a harmless, self-healing artifact
+  // (it just means one extra candidate briefly considered in matching),
+  // unlike the driver-availability flip above which has no self-healing path.
   await geoService.removePendingRide(ride.id);
   await rideStatusLogRepository.record(ride.id, "CANCELLED", reason ? { reason } : undefined);
+  rideOutcomesTotal.inc({ outcome: "cancelled" });
 
   // Notify whichever side didn't do the cancelling — the initiator already
   // has the answer from this call's own REST response.
@@ -373,6 +405,125 @@ export async function cancelRide(userId, rideId, reason) {
   }
 
   return sanitizeRide(updated, cancelledBy);
+}
+
+/**
+ * Runs on a schedule (see jobs/processors/cleanup.processor.js) so a stuck
+ * ride resolves itself instead of leaving a passenger or driver stranded
+ * indefinitely with no system-driven exit. Each cancellation is guarded by
+ * a conditional UPDATE keyed on the status this job observed, so a ride
+ * that legitimately transitions between the query and the write (accepted,
+ * cancelled, marked arrived) is simply skipped rather than incorrectly
+ * cancelled out from under whoever just acted on it.
+ */
+export async function expireStaleRides() {
+  const now = Date.now();
+  const requestedCutoff = new Date(now - REQUESTED_TIMEOUT_MINUTES * 60 * 1000);
+  const acceptedCutoff = new Date(now - ACCEPTED_TIMEOUT_MINUTES * 60 * 1000);
+  const arrivedCutoff = new Date(now - ARRIVED_TIMEOUT_MINUTES * 60 * 1000);
+
+  const [staleRequested, staleAccepted, staleArrived] = await Promise.all([
+    rideRepository.findStaleRequested(requestedCutoff),
+    rideRepository.findStaleAccepted(acceptedCutoff),
+    rideRepository.findStaleArrived(arrivedCutoff),
+  ]);
+
+  let expiredCount = 0;
+
+  for (const ride of staleRequested) {
+    const reason = `No driver accepted within ${REQUESTED_TIMEOUT_MINUTES} minutes`;
+    const result = await rideRepository.tryUpdateStatusIfCurrently(ride.id, "REQUESTED", {
+      status: "CANCELLED",
+      cancelledAt: new Date(),
+      cancelledBy: "SYSTEM",
+      cancellationReason: reason,
+    });
+    if (result.count === 0) continue;
+
+    await geoService.removePendingRide(ride.id);
+    await rideStatusLogRepository.record(ride.id, "CANCELLED", { reason });
+    rideOutcomesTotal.inc({ outcome: "expired" });
+    emitToUser(ride.passenger.userId, "ride:cancelled", sanitizeRide({ ...ride, status: "CANCELLED" }, "PASSENGER"));
+    expiredCount++;
+  }
+
+  for (const ride of staleAccepted) {
+    const reason = `Driver did not arrive within ${ACCEPTED_TIMEOUT_MINUTES} minutes of accepting`;
+    const [result] = await prisma.$transaction([
+      rideRepository.tryUpdateStatusIfCurrently(ride.id, "ACCEPTED", {
+        status: "CANCELLED",
+        cancelledAt: new Date(),
+        cancelledBy: "SYSTEM",
+        cancellationReason: reason,
+      }),
+      ...(ride.driverId ? [driverRepository.setAvailable(ride.driverId, true)] : []),
+    ]);
+    if (result.count === 0) continue;
+
+    await rideStatusLogRepository.record(ride.id, "CANCELLED", { reason });
+    rideOutcomesTotal.inc({ outcome: "expired" });
+    emitToUser(ride.passenger.userId, "ride:cancelled", sanitizeRide({ ...ride, status: "CANCELLED" }, "PASSENGER"));
+    if (ride.driver) {
+      emitToUser(ride.driver.userId, "ride:cancelled", sanitizeRide({ ...ride, status: "CANCELLED" }, "DRIVER"));
+    }
+    expiredCount++;
+  }
+
+  for (const ride of staleArrived) {
+    const reason = `OTP was never completed within ${ARRIVED_TIMEOUT_MINUTES} minutes of driver arrival`;
+    const [result] = await prisma.$transaction([
+      rideRepository.tryUpdateStatusIfCurrently(ride.id, "ARRIVED", {
+        status: "CANCELLED",
+        cancelledAt: new Date(),
+        cancelledBy: "SYSTEM",
+        cancellationReason: reason,
+      }),
+      ...(ride.driverId ? [driverRepository.setAvailable(ride.driverId, true)] : []),
+    ]);
+    if (result.count === 0) continue;
+
+    await rideStatusLogRepository.record(ride.id, "CANCELLED", { reason });
+    rideOutcomesTotal.inc({ outcome: "expired" });
+    emitToUser(ride.passenger.userId, "ride:cancelled", sanitizeRide({ ...ride, status: "CANCELLED" }, "PASSENGER"));
+    if (ride.driver) {
+      emitToUser(ride.driver.userId, "ride:cancelled", sanitizeRide({ ...ride, status: "CANCELLED" }, "DRIVER"));
+    }
+    expiredCount++;
+  }
+
+  return {
+    expiredRequested: staleRequested.length,
+    expiredAccepted: staleAccepted.length,
+    expiredArrived: staleArrived.length,
+    expiredCount,
+  };
+}
+
+/**
+ * Called on socket (re)connect so a client that missed events while
+ * disconnected — a status change, a cancellation — gets resynced with
+ * where the ride actually stands instead of only ever hearing about
+ * *future* events. Without this, a client relying solely on socket
+ * pushes has no way to notice it missed something during a dropped
+ * connection; it would just keep showing stale state until the user
+ * happens to trigger a REST refetch some other way.
+ */
+export async function getMyActiveRide(userId) {
+  const [passenger, driver] = await Promise.all([
+    passengerRepository.findByUserId(userId),
+    driverRepository.findByUserId(userId),
+  ]);
+
+  const [asPassenger, asDriver] = await Promise.all([
+    passenger ? rideRepository.findActiveByPassenger(passenger.id) : null,
+    driver ? rideRepository.findActiveByDriver(driver.id) : null,
+  ]);
+
+  const lean = asPassenger ?? asDriver;
+  if (!lean) return null;
+
+  const full = await rideRepository.findById(lean.id);
+  return sanitizeRide(full, asPassenger ? "PASSENGER" : "DRIVER");
 }
 
 export async function listDriverHistory(userId, { page, limit, status }) {

@@ -19,10 +19,36 @@ export function createEmailWorker() {
     QUEUE_NAMES.EMAIL,
     async (job) => {
       const { notificationId, to, subject, html } = job.data;
+
+      // A job can be redelivered after a crash between the send actually
+      // completing and markSent() persisting that fact — BullMQ's
+      // at-least-once delivery guarantee, not a bug in it. Without this
+      // check, that redelivery would send the email a second time. The
+      // Notification row's own status is the durable record of whether
+      // this already happened; SENT/FAILED both mean "done," so only a
+      // still-PENDING notification is actually sent.
+      if (notificationId) {
+        const notification = await notificationRepository.findById(notificationId);
+        if (notification && notification.status !== "PENDING") {
+          logger.debug("Skipping already-processed notification (redelivered job)", {
+            notificationId,
+            status: notification.status,
+          });
+          return;
+        }
+      }
+
       await sendEmail({ to, subject, html });
       if (notificationId) await notificationRepository.markSent(notificationId);
     },
-    { connection: queueConnection }
+    // Explicit rather than relying on BullMQ's default (also 30s): sized
+    // against mailer.js's own SMTP timeouts (10s connect + 10s greeting +
+    // 10s socket, worst case ~30s stacked) with headroom, so a
+    // legitimately-still-sending job never loses its lock to another
+    // worker mid-send — the actual failure mode a too-short lock would
+    // risk is the same email getting sent twice by two workers racing on
+    // the same job.
+    { connection: queueConnection, lockDuration: 45_000 }
   );
 
   worker.on("completed", (job) => {

@@ -3,6 +3,7 @@ import { sanitizeUser } from "../utils/sanitizeUser.js";
 import * as userRepository from "../repositories/user.repository.js";
 import * as tokenRepository from "../repositories/token.repository.js";
 import * as auditLogRepository from "../repositories/auditLog.repository.js";
+import { revokeAllUserAccessTokens } from "./token.service.js";
 
 export async function listUsers({ page, limit, role, isActive, search }) {
   const [users, total] = await Promise.all([
@@ -42,8 +43,11 @@ export async function setUserActiveStatus(targetUserId, isActive, actor) {
 
   if (!isActive) {
     // A deactivated account shouldn't be able to keep using tokens issued
-    // before the ban — revoke every session immediately.
+    // before the ban — revoke every session immediately, refresh and
+    // access tokens both (revoking only refresh tokens still leaves an
+    // already-issued access token usable for up to its own TTL).
     await tokenRepository.revokeAllUserRefreshTokens(targetUserId);
+    await revokeAllUserAccessTokens(targetUserId);
   }
 
   await auditLogRepository.record({

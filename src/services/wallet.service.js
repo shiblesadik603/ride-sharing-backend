@@ -47,21 +47,34 @@ export async function confirmTopUp(userId, amountCents, paymentIntentId) {
 
   const amount = fromStripeCents(amountCents);
 
-  await prisma.$transaction(async (tx) => {
-    await walletRepository.credit(wallet.id, amount, tx);
-    const updated = await walletRepository.findByUserId(userId, tx);
-    await walletRepository.createTransaction(
-      {
-        walletId: wallet.id,
-        type: "CREDIT",
-        reason: "TOPUP",
-        amount,
-        balanceAfter: updated.balance,
-        referenceId: paymentIntentId,
-      },
-      tx
-    );
-  });
+  try {
+    await prisma.$transaction(async (tx) => {
+      await walletRepository.credit(wallet.id, amount, tx);
+      const updated = await walletRepository.findByUserId(userId, tx);
+      await walletRepository.createTransaction(
+        {
+          walletId: wallet.id,
+          type: "CREDIT",
+          reason: "TOPUP",
+          amount,
+          balanceAfter: updated.balance,
+          referenceId: paymentIntentId,
+        },
+        tx
+      );
+    });
+  } catch (err) {
+    // Stripe delivers webhooks at-least-once and does redeliver on
+    // timeout/5xx — the unique (walletId, reason, referenceId) constraint
+    // on WalletTransaction is what actually stops a redelivered event from
+    // double-crediting. A P2002 here means "already processed this exact
+    // PaymentIntent," so it's a successful no-op, not a failure: the
+    // *whole* transaction (including the credit) rolled back atomically,
+    // so returning normally is correct, and the webhook caller should get
+    // a 200 rather than retry forever.
+    if (err.code === "P2002") return;
+    throw err;
+  }
 }
 
 /**
@@ -113,13 +126,21 @@ export async function adjustBalance(targetUserId, amount, reason, actor) {
   return updated;
 }
 
-/** Used by payment.service.js when refunding a WALLET or CASH payment —
+/**
+ * Used by payment.service.js when refunding a WALLET or CASH payment —
  * crediting the wallet is the only channel available to push money back
- * to the payer ourselves; there's no card to reverse a charge on. */
-export async function creditRefund(userId, amount, referenceId) {
-  const wallet = await walletRepository.findByUserId(userId);
-
-  await prisma.$transaction(async (tx) => {
+ * to the payer ourselves; there's no card to reverse a charge on.
+ *
+ * Accepts an optional transaction client so the caller can fold this into
+ * a larger atomic operation (the refund record + payment status update
+ * that always accompany it). Without that, a crash between "wallet
+ * credited" and "refund/payment rows written" leaves money credited with
+ * no record of why, and risks a double refund if the request is retried.
+ * Falls back to opening its own transaction when called standalone.
+ */
+export async function creditRefund(userId, amount, referenceId, client) {
+  const run = async (tx) => {
+    const wallet = await walletRepository.findByUserId(userId, tx);
     await walletRepository.credit(wallet.id, amount, tx);
     const updated = await walletRepository.findByUserId(userId, tx);
     await walletRepository.createTransaction(
@@ -133,5 +154,8 @@ export async function creditRefund(userId, amount, referenceId) {
       },
       tx
     );
-  });
+  };
+
+  if (client) return run(client);
+  return prisma.$transaction(run);
 }
